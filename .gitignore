@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Node
+node_modules/
+web/dist/
+web/.vite/
+npm-debug.log*
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+!api/env.example
+
+# Uploads (user content, never committed)
+api/uploads/
+
+# ML artifacts (large binaries, regenerate via ml/ scripts)
+ml/models/*.joblib
+ml/models/*.pkl
+ml/data/*.csv
+
+# OS / editor
+.DS_Store
+*.log
+.vscode/
+.idea/
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
