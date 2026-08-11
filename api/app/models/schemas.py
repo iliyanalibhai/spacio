@@ -2,7 +2,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class StorageSize(str, Enum):
@@ -38,8 +38,7 @@ class UserPublic(BaseModel):
     createdAt: datetime
     verificationStatus: Optional[str] = None
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class TokenResponse(BaseModel):
@@ -79,8 +78,7 @@ class ListingPublic(ListingBase):
     availableTo: Optional[datetime] = None
     bookingDeadline: Optional[datetime] = None
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ListingUpdate(BaseModel):
@@ -127,8 +125,7 @@ class ReservationPublic(BaseModel):
     holdExpiresAt: datetime
     createdAt: datetime
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class MessageCreate(BaseModel):
@@ -143,5 +140,4 @@ class MessagePublic(BaseModel):
     content: str
     createdAt: datetime
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)

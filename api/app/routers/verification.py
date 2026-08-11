@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from motor.motor_asyncio import AsyncIOMotorDatabase
 import stripe
@@ -49,7 +51,7 @@ async def create_verification_session(
 
         return {"url": verification_session.url, "sessionId": verification_session.id}
 
-    except stripe.error.StripeError as e:
+    except stripe.StripeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -84,7 +86,7 @@ async def get_verification_status(
 
         return {"status": new_status, "verified": new_status == "verified", "stripeStatus": session.status}
 
-    except stripe.error.StripeError as e:
+    except stripe.StripeError as e:
         return {
             "status": current_user.get("verificationStatus", "unverified"),
             "verified": False,
@@ -104,13 +106,13 @@ async def stripe_webhook(request: Request, db: AsyncIOMotorDatabase = Depends(ge
     payload = await request.body()
 
     try:
-        event = stripe.Event.construct_from(stripe.util.json.loads(payload), stripe.api_key)
+        event = stripe.Event.construct_from(json.loads(payload), stripe.api_key)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid payload")
 
     if event.type == "identity.verification_session.verified":
         session = event.data.object
-        user_id = session.metadata.get("user_id")
+        user_id = session.get("metadata", {}).get("user_id")
         if user_id:
             await db.users.update_one(
                 {"_id": user_id}, {"$set": {"verificationStatus": "verified"}}
@@ -118,7 +120,7 @@ async def stripe_webhook(request: Request, db: AsyncIOMotorDatabase = Depends(ge
 
     elif event.type == "identity.verification_session.requires_input":
         session = event.data.object
-        user_id = session.metadata.get("user_id")
+        user_id = session.get("metadata", {}).get("user_id")
         if user_id:
             await db.users.update_one(
                 {"_id": user_id}, {"$set": {"verificationStatus": "requires_input"}}

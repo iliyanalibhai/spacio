@@ -57,7 +57,7 @@ async def create_listing(
         "createdAt": now,
     }
     await db.listings.insert_one(doc)
-    return ListingPublic(**doc)
+    return ListingPublic.model_validate(doc)
 
 
 @router.get("/", response_model=List[ListingPublic])
@@ -98,15 +98,15 @@ async def list_listings(
                 return False
             return True
 
-        listings = [l for l in listings if is_within_availability(l)]
+        listings = [listing for listing in listings if is_within_availability(listing)]
 
-    host_ids = list({l.get("hostId") for l in listings if l.get("hostId")})
+    host_ids = list({listing.get("hostId") for listing in listings if listing.get("hostId")})
     hosts = {}
     if host_ids:
         host_list = await db.users.find({"_id": {"$in": host_ids}}).to_list(length=100)
         hosts = {h["_id"]: h for h in host_list}
 
-    listing_ids = [l["_id"] for l in listings]
+    listing_ids = [listing["_id"] for listing in listings]
     now = datetime.utcnow()
     active_reservations = await db.reservations.find(
         {
@@ -131,12 +131,12 @@ async def list_listings(
 
     if zipCode:
         listings.sort(
-            key=lambda l: (
-                0 if l.get("zipCode") == zipCode else 1,
-                -(l.get("rating") or 0),
+            key=lambda listing: (
+                0 if listing.get("zipCode") == zipCode else 1,
+                -(listing.get("rating") or 0),
             )
         )
-    return [ListingPublic(**listing) for listing in listings]
+    return [ListingPublic.model_validate(listing) for listing in listings]
 
 
 @router.get("/mine", response_model=List[ListingPublic])
@@ -147,7 +147,7 @@ async def my_listings(
     if not current_user.get("isHost"):
         raise HTTPException(status_code=403, detail="Only hosts can view their listings")
     items = await db.listings.find({"hostId": current_user["_id"]}).to_list(length=200)
-    return [ListingPublic(**l) for l in items]
+    return [ListingPublic.model_validate(item) for item in items]
 
 
 @router.get("/{listing_id}", response_model=ListingPublic)
@@ -155,7 +155,7 @@ async def get_listing(listing_id: str, db: AsyncIOMotorDatabase = Depends(get_db
     listing = await db.listings.find_one({"_id": listing_id})
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
-    return ListingPublic(**listing)
+    return ListingPublic.model_validate(listing)
 
 
 @router.patch("/{listing_id}", response_model=ListingPublic)
@@ -175,11 +175,11 @@ async def update_listing(
     if "sizeSqft" in updates and updates["sizeSqft"] is not None:
         updates["size"] = _size_bucket_for_sqft(updates["sizeSqft"])
     if not updates:
-        return ListingPublic(**listing)
+        return ListingPublic.model_validate(listing)
 
     await db.listings.update_one({"_id": listing_id}, {"$set": updates})
     listing.update(updates)
-    return ListingPublic(**listing)
+    return ListingPublic.model_validate(listing)
 
 
 @router.delete("/{listing_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -49,7 +49,7 @@ async def send_message(
         "createdAt": now,
     }
     await db.messages.insert_one(doc)
-    return MessagePublic(**doc)
+    return MessagePublic.model_validate(doc)
 
 
 @router.get("/{reservation_id}", response_model=List[MessagePublic])
@@ -64,4 +64,4 @@ async def list_messages(
     messages = await db.messages.find({"reservationId": reservation_id}).sort("createdAt").to_list(
         length=500
     )
-    return [MessagePublic(**m) for m in messages]
+    return [MessagePublic.model_validate(m) for m in messages]

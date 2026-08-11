@@ -39,7 +39,7 @@ async def register(user: UserCreate, db: AsyncIOMotorDatabase = Depends(get_db))
         await db.users.insert_one(doc)
     except DuplicateKeyError:
         raise HTTPException(status_code=400, detail="Email already registered")
-    return UserPublic(**doc)
+    return UserPublic.model_validate(doc)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -56,4 +56,4 @@ async def login(
 
 @router.get("/me", response_model=UserPublic)
 async def me(current_user: dict = Depends(get_current_user)):
-    return UserPublic(**current_user)
+    return UserPublic.model_validate(current_user)

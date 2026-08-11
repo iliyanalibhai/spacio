@@ -39,8 +39,8 @@ def suggest_price(
     zip_code: str,
     indoor: Optional[bool] = None,
 ) -> tuple[float, float, float, str]:
-    size = size.upper()
-    base = BASE_PRICES_BY_SIZE.get(size, BASE_PRICES_BY_SIZE["M"])
+    size_key = size.upper()
+    base = BASE_PRICES_BY_SIZE.get(size_key, BASE_PRICES_BY_SIZE["M"])
     factors: list[str] = []
 
     demand_factor = 1.0
@@ -59,7 +59,7 @@ def suggest_price(
 
     factor_text = " ".join(factors) if factors else "no adjustments"
     explanation = (
-        f"Placeholder estimate for a {size}-size space in {zip_code or 'your area'}: "
+        f"Placeholder estimate for a {size_key}-size space in {zip_code or 'your area'}: "
         f"base ${base:.0f}, {factor_text}. This is a fixed heuristic, not a "
         f"trained model — Spacio doesn't have booking history yet. A real "
         f"pricing model trained on comparable data is planned; see the "

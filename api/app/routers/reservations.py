@@ -137,7 +137,7 @@ async def create_reservation(
         "paymentStatus": "mocked-success",
     }
     await db.reservations.insert_one(doc)
-    return ReservationPublic(**doc)
+    return ReservationPublic.model_validate(doc)
 
 
 async def _load_reservation_and_listing(db: AsyncIOMotorDatabase, reservation_id: str):
@@ -180,7 +180,7 @@ async def approve_reservation(
     reservation = await _transition_reservation(
         db, reservation_id, current_user, ReservationStatus.confirmed
     )
-    return ReservationPublic(**reservation)
+    return ReservationPublic.model_validate(reservation)
 
 
 @router.post("/{reservation_id}/decline", response_model=ReservationPublic)
@@ -192,7 +192,7 @@ async def decline_reservation(
     reservation = await _transition_reservation(
         db, reservation_id, current_user, ReservationStatus.declined
     )
-    return ReservationPublic(**reservation)
+    return ReservationPublic.model_validate(reservation)
 
 
 @router.get("/", response_model=List[ReservationPublic])
@@ -206,12 +206,12 @@ async def list_my_reservations(
         host_listings = await db.listings.find({"hostId": current_user["_id"]}).to_list(
             length=200
         )
-        host_listing_ids = [l["_id"] for l in host_listings]
+        host_listing_ids = [listing["_id"] for listing in host_listings]
         filters = {"$or": [{"renterId": current_user["_id"]}, {"listingId": {"$in": host_listing_ids}}]}
 
     cursor = db.reservations.find(filters)
     reservations = await cursor.to_list(length=200)
-    return [ReservationPublic(**r) for r in reservations]
+    return [ReservationPublic.model_validate(r) for r in reservations]
 
 
 @router.delete("/{reservation_id}", status_code=status.HTTP_204_NO_CONTENT)
