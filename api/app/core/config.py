@@ -1,7 +1,8 @@
+import json
 from functools import lru_cache
 from typing import List
 
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,7 +18,14 @@ class Settings(BaseSettings):
     jwt_secret: str = Field(default="super-secret-key")
     jwt_algorithm: str = Field(default="HS256")
     access_token_expire_minutes: int = Field(default=60 * 24)
-    cors_origins: List[str] = Field(default=["*"])
+
+    # Deliberately typed as `str`, not `List[str]`: pydantic-settings tries
+    # to JSON-decode env values for List-typed fields *before* any
+    # validator runs, which crashes startup on a plain value like
+    # `CORS_ORIGINS=http://localhost:5173` (not valid JSON). Kept as a raw
+    # string and parsed in `cors_origins_list` instead, which accepts both
+    # a single origin, a comma-separated list, or a JSON array.
+    cors_origins: str = Field(default="*")
 
     # Resolved 2026-08-10: the v1 prototype disagreed with itself on this
     # number (business plan said 10-15%, financial model assumed 20%,
@@ -39,22 +47,14 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def _parse_cors_origins(cls, value):
-        """Accept either a JSON list or a comma-separated string.
-
-        pydantic-settings expects JSON for list-typed env vars by default,
-        but a single bare origin (CORS_ORIGINS=http://localhost:5173) reads
-        naturally as a plain string. Supporting both avoids a footgun where
-        the env.example format silently fails to parse.
-        """
-        if isinstance(value, str):
-            stripped = value.strip()
-            if stripped.startswith("["):
-                return value
-            return [origin.strip() for origin in stripped.split(",") if origin.strip()]
-        return value
+    @property
+    def cors_origins_list(self) -> List[str]:
+        """Parse cors_origins into a list, accepting a JSON array, a
+        comma-separated string, or a single bare origin."""
+        stripped = self.cors_origins.strip()
+        if stripped.startswith("["):
+            return json.loads(stripped)
+        return [origin.strip() for origin in stripped.split(",") if origin.strip()]
 
 
 @lru_cache
