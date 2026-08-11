@@ -486,6 +486,20 @@ that supersedes it and say why.
   matching the base price formula. Not explicit in the business brief;
   chosen for internal consistency rather than flat monthly charges
   regardless of stay length.
+- **2026-08-10** — Ported `web/` deliberately rather than bulk-copying v1's
+  2297-line `App.tsx`: split into `pages/`/`components/`/`lib/` (one file per
+  page, not yet the full one-component-per-file split — that's Phase 4).
+  Made three related calls while doing so, none dictated by the brief but
+  each following directly from a ground rule already in it: (1) dropped v1's
+  post-reservation redirect to a real Stripe checkout link (its own, from the
+  old team's account) — `paymentStatus` is `mocked-success` server-side, so
+  sending a user to a real payment page there would be dishonest, not just
+  unnecessary; (2) dropped the `?? 4.7` fake-rating fallback in the UI to
+  match the backend's genuine `null`; (3) relabeled "AI Match"/"AI
+  suggestion" to "Smart Match"/"Price suggestion" to match what
+  `services/matching.py` and `services/ai_pricing.py` actually are —
+  heuristics, not AI — per the "never misrepresent in user-facing strings"
+  rule.
 
 ## 11. Known limitations & next steps
 
