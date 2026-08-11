@@ -1,0 +1,52 @@
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from app.core.config import settings
+from app.core.paths import IMAGES_DIR, UPLOAD_DIR
+from app.db import ensure_indexes
+from app.routers import auth, listings, reservations, messages, pricing, matching, verification
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await ensure_indexes()
+    yield
+
+
+app = FastAPI(
+    title="Spacio API",
+    version="0.1.0",
+    description="Peer-to-peer storage marketplace API",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok"}
+
+
+app.include_router(auth.router, prefix="/auth", tags=["auth"])
+app.include_router(listings.router, prefix="/listings", tags=["listings"])
+app.include_router(reservations.router, prefix="/reservations", tags=["reservations"])
+app.include_router(messages.router, prefix="/messages", tags=["messages"])
+app.include_router(pricing.router, prefix="/pricing", tags=["pricing"])
+app.include_router(matching.router, prefix="/matching", tags=["matching"])
+app.include_router(verification.router, prefix="/verification", tags=["verification"])
+
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
+IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/images", StaticFiles(directory=str(IMAGES_DIR)), name="images")
