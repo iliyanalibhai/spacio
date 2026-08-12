@@ -1,24 +1,14 @@
 # Spacio
 
-Spacio is a peer-to-peer storage marketplace — "Airbnb for storage." People with
+Spacio is a peer-to-peer storage marketplace, "Airbnb for storage." People with
 unused space (garages, closets, spare bedrooms, basements) list it. People who
 need storage rent part of it, for the dates they need, paying only for the
 square footage they actually use.
 
-The full product thesis, business rules, and engineering decisions live in
-[`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md) — read that first if you want
-to understand *why* something works the way it does, not just how to run it.
-
-## Credit
-
-This project is a from-scratch rewrite of a prototype originally built for a
-university entrepreneurship class by **Saachi Raju**, **Akanksha Divya**, and
-**Ali Bhai** (Team 07). The original prototype (domain model, pro-rated
-pricing math, and partial-space concurrent booking logic) is referenced —
-never copied wholesale — from
-[`saachiraju/Team-07-Spacio`](https://github.com/saachiraju/Team-07-Spacio).
-This repository is an independent rewrite, not a fork, and is not affiliated
-with that repository going forward.
+If you would like to understand the thought process I put for Spacio's
+product thesis, business rules, engineering decisions, you can view them in
+docs/DOCUMENTATION.MD. This truly encapulsates the logic I put into a product
+of why something works, not just how it runs.
 
 ## Monorepo structure
 
@@ -37,7 +27,7 @@ spacio/
 This project is under active, phased development. See
 [`docs/DOCUMENTATION.md` §11](docs/DOCUMENTATION.md#11-known-limitations--next-steps)
 for exactly what's finished versus stubbed. Nothing in this README claims more
-than what's actually implemented — if a feature isn't listed below, assume
+than what's actually implemented, if a feature isn't listed below, assume
 it's not built yet.
 
 Currently implemented (Phase 0): user auth, listings, pro-rated bookings with
@@ -48,7 +38,7 @@ host verification, and a seed script with working demo accounts.
 
 ### Prerequisites
 
-- Docker and Docker Compose (recommended — brings up Mongo, API, and web with
+- Docker and Docker Compose (recommended, brings up Mongo, API, and web with
   one command), **or** Python 3.11+, Node.js 20+, and a local MongoDB instance
   if you'd rather run services natively.
 
@@ -102,4 +92,4 @@ cd web && npm test
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT, see [`LICENSE`](LICENSE).
