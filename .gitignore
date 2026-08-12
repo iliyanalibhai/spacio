@@ -37,6 +37,7 @@ ml/data/*.csv
 *.log
 .vscode/
 .idea/
+.claude/
 
 # Coverage
 .coverage

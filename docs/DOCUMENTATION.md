@@ -500,6 +500,13 @@ that supersedes it and say why.
   `services/matching.py` and `services/ai_pricing.py` actually are —
   heuristics, not AI — per the "never misrepresent in user-facing strings"
   rule.
+- **2026-08-12** — Added `docker-compose.yml` plus a `Dockerfile` for each of
+  `api/` and `web/`, completing the Docker quickstart the README already
+  documented. Both services run in dev mode inside containers (`uvicorn
+  --reload`, `vite --host 0.0.0.0`) with the source tree bind-mounted for hot
+  reload, matching how they're run natively — this is a dev compose file, not
+  a production build. `api/.dockerignore` excludes `.env` and `.venv` so
+  secrets and the host virtualenv are never baked into the image layer.
 
 ## 11. Known limitations & next steps
 
