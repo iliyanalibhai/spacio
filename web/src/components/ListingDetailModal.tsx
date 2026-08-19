@@ -5,6 +5,7 @@ import { useAuth } from "../hooks/useAuth";
 import * as reservationApi from "../api/reservations";
 import { getListingImage } from "../lib/getListingImage";
 import { quoteReservation, BOX_PRICE_PER_MONTH } from "../lib/reservationPricing";
+import { formatDateOnly } from "../lib/formatDate";
 
 export function ListingDetailModal({
   listing,
@@ -317,12 +318,12 @@ export function ListingDetailModal({
             {listing.availableFrom && listing.availableTo && (
               <p className="mt-2 text-sm text-slate-600">
                 <span className="font-medium">Available:</span>{" "}
-                {new Date(listing.availableFrom).toLocaleDateString()} - {new Date(listing.availableTo).toLocaleDateString()}
+                {formatDateOnly(listing.availableFrom)} - {formatDateOnly(listing.availableTo)}
               </p>
             )}
             {listing.bookingDeadline ? (
               <p className="mt-2 text-sm text-amber-600">
-                <span className="font-medium">Book by:</span> {new Date(listing.bookingDeadline).toLocaleDateString()}
+                <span className="font-medium">Book by:</span> {formatDateOnly(listing.bookingDeadline)}
               </p>
             ) : (
               <p className="mt-2 text-sm text-emerald-600">No booking deadline</p>

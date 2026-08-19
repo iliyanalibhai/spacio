@@ -4,6 +4,7 @@ import type { Listing, StorageSize } from "../types";
 import * as listingApi from "../api/listings";
 import { ListingCard } from "../components/ListingCard";
 import { ListingDetailModal } from "../components/ListingDetailModal";
+import { formatDateOnly } from "../lib/formatDate";
 
 export function Landing() {
   const [filters, setFilters] = useState<{
@@ -134,7 +135,7 @@ export function Landing() {
                 <p className="text-slate-600">
                   {filters.zipCode && `matching "${filters.zipCode}"`}
                   {filters.startDate && filters.endDate &&
-                    ` • ${new Date(filters.startDate).toLocaleDateString()} - ${new Date(filters.endDate).toLocaleDateString()}`}
+                    ` • ${formatDateOnly(filters.startDate)} - ${formatDateOnly(filters.endDate)}`}
                 </p>
               </div>
               <div className="flex items-center gap-3">

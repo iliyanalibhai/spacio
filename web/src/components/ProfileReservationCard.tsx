@@ -5,6 +5,7 @@ import { useAuth } from "../hooks/useAuth";
 import * as listingApi from "../api/listings";
 import * as messageApi from "../api/messages";
 import { getListingImage } from "../lib/getListingImage";
+import { formatDateOnly } from "../lib/formatDate";
 
 const statusConfig = {
   pending_host_confirmation: { bg: "bg-amber-100", text: "text-amber-700", label: "Pending Approval" },
@@ -65,7 +66,7 @@ export function ProfileReservationCard({ reservation }: { reservation: Reservati
           <div className="mt-3 flex flex-wrap items-center gap-4 text-sm">
             <div className="flex items-center gap-1 text-slate-600">
               <span>
-                {new Date(reservation.startDate).toLocaleDateString()} - {new Date(reservation.endDate).toLocaleDateString()}
+                {formatDateOnly(reservation.startDate)} - {formatDateOnly(reservation.endDate)}
               </span>
             </div>
             <div className="flex items-center gap-2">
