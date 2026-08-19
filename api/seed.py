@@ -30,7 +30,7 @@ DEMO_PASSWORD = "password123"
 
 
 async def seed() -> None:
-    client = AsyncIOMotorClient(settings.mongodb_uri)
+    client: AsyncIOMotorClient = AsyncIOMotorClient(settings.mongodb_uri)
     db = client[settings.database_name]
 
     # Scoped deletes: only ever remove documents this script created.
