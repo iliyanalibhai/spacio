@@ -10,7 +10,12 @@ import { RenterDashboard } from "./pages/RenterDashboard";
 import { SmartMatch } from "./pages/SmartMatch";
 
 function RequireAuth({ children, hostOnly = false }: { children: JSX.Element; hostOnly?: boolean }) {
-  const { user } = useAuth();
+  const { user, initializing } = useAuth();
+  // Wait for the initial /auth/me check to resolve before deciding to
+  // redirect — otherwise a hard refresh or deep link to a protected route
+  // always bounces to /login first, even with a valid token in storage,
+  // since `user` starts null until that async check completes.
+  if (initializing) return null;
   if (!user) return <Navigate to="/login" replace />;
   if (hostOnly && !user.isHost) return <Navigate to="/" replace />;
   return children;

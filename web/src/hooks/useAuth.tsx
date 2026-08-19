@@ -20,6 +20,7 @@ type AuthContextValue = {
   logout: () => void;
   refreshUser: () => Promise<void>;
   loading: boolean;
+  initializing: boolean;
   error: string | null;
 };
 
@@ -37,11 +38,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY));
   const [loading, setLoading] = useState(false);
+  const [initializing, setInitializing] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
   const fetchMe = useCallback(async () => {
-    if (!token) return;
+    if (!token) {
+      setInitializing(false);
+      return;
+    }
     try {
       const data = await authApi.me();
       setUser(data);
@@ -49,6 +54,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       localStorage.removeItem(TOKEN_KEY);
       setToken(null);
+    } finally {
+      setInitializing(false);
     }
   }, [token]);
 
@@ -104,8 +111,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [fetchMe]);
 
   const value = useMemo(
-    () => ({ user, token, login, register, logout, refreshUser, loading, error }),
-    [user, token, login, register, logout, refreshUser, loading, error]
+    () => ({ user, token, login, register, logout, refreshUser, loading, initializing, error }),
+    [user, token, login, register, logout, refreshUser, loading, initializing, error]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
