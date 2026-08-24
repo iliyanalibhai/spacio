@@ -2,7 +2,7 @@ import json
 from functools import lru_cache
 from typing import List
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,14 +10,18 @@ class Settings(BaseSettings):
     mongodb_uri: str = Field(default="mongodb://localhost:27017")
     database_name: str = Field(default="spacio")
 
-    # NOTE: a hardcoded default secret and a wildcard CORS origin are known
-    # Tier 2 security issues carried over from the v1 audit. Fixing them
-    # (require jwt_secret with no default, fail fast at startup if unset,
-    # require explicit CORS origins) is scheduled for Phase 1 — see
-    # docs/DOCUMENTATION.md §7. Tracked here, not silently ignored.
-    jwt_secret: str = Field(default="super-secret-key")
+    # No default: an unset JWT_SECRET must fail startup rather than silently
+    # signing tokens with a well-known string. See docs/DOCUMENTATION.md §7.
+    jwt_secret: str
     jwt_algorithm: str = Field(default="HS256")
     access_token_expire_minutes: int = Field(default=60 * 24)
+
+    # Whether the login cookie requires HTTPS (the `Secure` cookie
+    # attribute). Must be False for local dev (uvicorn/Vite serve over
+    # plain http://localhost) but MUST be set True in any real deployment —
+    # otherwise the session cookie would be sent over unencrypted
+    # connections too. See docs/DOCUMENTATION.md §7.
+    cookie_secure: bool = Field(default=False)
 
     # Deliberately typed as `str`, not `List[str]`: pydantic-settings tries
     # to JSON-decode env values for List-typed fields *before* any
@@ -25,7 +29,11 @@ class Settings(BaseSettings):
     # `CORS_ORIGINS=http://localhost:5173` (not valid JSON). Kept as a raw
     # string and parsed in `cors_origins_list` instead, which accepts both
     # a single origin, a comma-separated list, or a JSON array.
-    cors_origins: str = Field(default="*")
+    #
+    # No default, and "*" is rejected below: a wildcard origin combined with
+    # allow_credentials=True (main.py) lets any site read authenticated
+    # responses. See docs/DOCUMENTATION.md §7.
+    cors_origins: str
 
     # Resolved 2026-08-10: the v1 prototype disagreed with itself on this
     # number (business plan said 10-15%, financial model assumed 20%,
@@ -47,6 +55,17 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    @field_validator("cors_origins")
+    @classmethod
+    def reject_wildcard_cors(cls, value: str) -> str:
+        if value.strip() == "*":
+            raise ValueError(
+                "CORS_ORIGINS='*' is not allowed with allow_credentials=True "
+                "(main.py) — list explicit origins instead, e.g. "
+                "'http://localhost:5173' or a comma-separated list."
+            )
+        return value
+
     @property
     def cors_origins_list(self) -> List[str]:
         """Parse cors_origins into a list, accepting a JSON array, a
@@ -59,7 +78,10 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    # mypy sees jwt_secret/cors_origins as required constructor args since
+    # they have no default; pydantic-settings actually fills them from env
+    # vars/`.env` at runtime, which mypy's static view can't see.
+    return Settings()  # type: ignore[call-arg]
 
 
 settings = get_settings()
