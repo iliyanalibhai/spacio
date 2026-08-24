@@ -159,8 +159,9 @@ to need a dedicated state manager.
 
 ### JWT auth (not sessions, not OAuth)
 
-**What:** Stateless JSON Web Tokens issued on login, sent as a Bearer token,
-validated per-request via `python-jose`.
+**What:** Stateless JSON Web Tokens issued on login, delivered as an
+`HttpOnly` cookie (with an `Authorization: Bearer` header accepted as a
+fallback for non-browser callers), validated per-request via `python-jose`.
 **Why:** No server-side session store to run or scale; a single `/auth/me`
 lookup validates the token and loads the current user. This matches a
 FastAPI + Mongo stack without adding Redis just to hold sessions.
@@ -170,10 +171,12 @@ one API instance. Full OAuth (Google/Apple sign-in) — good for reducing
 signup friction, but adds a provider integration before we've validated the
 core product; deferred, not rejected.
 **Tradeoffs accepted:** JWTs can't be revoked before they expire without an
-explicit denylist (we don't have one yet — see §7 and §11). Storing the token
-in `localStorage` (current state, inherited from v1) is vulnerable to XSS
-token theft; a 401-interceptor-with-refresh and safer storage are tracked for
-Phase 1 (§7).
+explicit denylist (we don't have one yet — see §11). The token used to live in
+`localStorage` (inherited from v1), which was vulnerable to XSS token theft;
+fixed by moving to an `HttpOnly` cookie plus a 401 interceptor — see §7.
+Cookie-based auth in turn means CSRF is the relevant threat model instead of
+XSS-token-theft; mitigated with `SameSite=Lax`, without a separate CSRF
+token yet (tracked in §11 as a possible defense-in-depth addition).
 **Revisit if:** We add social login, or need instant token revocation (e.g.,
 "log out all devices").
 
@@ -430,13 +433,13 @@ now so nothing gets silently forgotten between phases.
 | Vulnerability | Status |
 |---|---|
 | Stripe webhook signature not verified (`stripe.Event.construct_from` on raw body) | Fixed — see below |
-| `verificationStatus = "verified-mock"` self-attestation bypass at registration | Open — Phase 1 |
-| `cors_origins` defaults to `["*"]` with `allow_credentials=True` | Open — Phase 1 |
-| `jwt_secret` defaults to a literal string instead of failing fast when unset | Open — Phase 1 |
-| JWT in `localStorage`, no expiry handling, no 401 interceptor | Open — Phase 1 |
-| Upload endpoint trusts client-supplied `Content-Type`, no size limit | Open — Phase 1 |
+| `verificationStatus = "verified-mock"` self-attestation bypass at registration | Fixed — see below |
+| `cors_origins` defaults to `["*"]` with `allow_credentials=True` | Fixed — see below |
+| `jwt_secret` defaults to a literal string instead of failing fast when unset | Fixed — see below |
+| JWT in `localStorage`, no expiry handling, no 401 interceptor | Fixed — see below |
+| Upload endpoint trusts client-supplied `Content-Type`, no size limit | Fixed — see below |
 | `GET /listings` returns raw Mongo documents instead of a response model | Fixed in Phase 0 — see below |
-| No rate limiting on `/auth/login` or `/pricing/suggest` | Open — Phase 1 |
+| No rate limiting on `/auth/login` or `/pricing/suggest` | Fixed — see below |
 
 `GET /listings` now returns a typed response instead of raw documents so
 undocumented fields never leak to unauthenticated callers.
@@ -446,9 +449,67 @@ The Stripe webhook now verifies the `stripe-signature` header via
 forged and unsigned requests with a 400 — see
 `api/tests/test_verification_webhook.py`.
 
+`jwt_secret` and `cors_origins` (`app/core/config.py`) no longer have
+defaults, so an unset `JWT_SECRET` or `CORS_ORIGINS` now fails startup
+instead of silently signing tokens with a well-known key or opening the API
+to any origin. `cors_origins` also has a validator that explicitly rejects
+`"*"`, since that combined with `allow_credentials=True` (`main.py`) would
+let any website read authenticated responses from a logged-in user's
+browser.
+
+`POST /listings/upload` (`app/routers/listings.py`) now: caps the read at
+5MB (rejecting larger uploads with 413 without buffering the whole file);
+decodes the bytes with Pillow and checks the real detected format instead of
+trusting the client's `Content-Type` or filename extension; and writes back
+the re-decoded pixel data rather than the raw uploaded bytes, which strips
+EXIF metadata and any non-image bytes appended after the image data. See
+`api/tests/test_listing_upload.py`.
+
+`POST /auth/login` (5/minute) and `POST /pricing/suggest` (20/minute) are now
+rate limited per caller IP via `slowapi`, returning 429 once exceeded — a
+shared `Limiter` (`app/core/rate_limit.py`) is wired into `main.py` and
+applied per-endpoint with `@limiter.limit(...)`. Login gets the stricter
+limit since it's the brute-force/credential-stuffing target; pricing/suggest
+just needs enough headroom for normal debounced typing in the host listing
+form. Storage is in-memory, which is correct for the current single-process
+deployment but would need a shared backend (e.g. Redis) before running
+multiple API replicas. See `api/tests/test_rate_limiting.py`.
+
+`POST /auth/register` (`app/routers/auth.py`) no longer accepts a client-
+supplied `backgroundCheckAccepted` flag or sets `verificationStatus:
+"verified-mock"` from it — every new user now always starts at `"pending"`,
+regardless of request body. `"verified"` is only ever set by the real Stripe
+Identity flow (`app/routers/verification.py`, driven by the signed webhook).
+The dead `backgroundCheckAccepted` field was removed from `UserCreate`
+(`app/models/schemas.py`), `seed.py`'s fixtures, and the frontend's register
+form/payload type, since it never did anything the UI surfaced. See
+`api/tests/test_api_authorization.py::test_registration_cannot_self_attest_verification`.
+
+The JWT no longer lives in `localStorage`. `POST /auth/login`
+(`app/routers/auth.py`) sets it as an `HttpOnly` cookie (`Secure` gated by
+the new `COOKIE_SECURE` setting, `SameSite=Lax`) instead of returning it in
+the JSON body — page JS can no longer read the session token at all, closing
+the XSS-token-theft path the old `localStorage` model was exposed to.
+`app/deps/auth.py`'s `get_current_user` reads the cookie first, falling back
+to an `Authorization: Bearer` header for non-browser callers (scripts, this
+test suite). A new `POST /auth/logout` clears the cookie (JS can't clear an
+`HttpOnly` cookie itself). On the frontend, `api/client.ts` sets
+`withCredentials: true` and drops the old manual header-attaching
+interceptor, and adds a response interceptor that redirects to `/login` on
+any 401 other than the initial `/auth/me` session check — the "no expiry
+handling" half of this issue. Verified against a real browser (login →
+`localStorage`/`document.cookie` both confirmed empty, cookie survives a
+hard reload, logout invalidates the session immediately, and a live 401 on
+an authenticated call triggers the redirect) in addition to the backend
+test suite (`api/tests/test_api_authorization.py`,
+`test_register_then_login_sets_httponly_cookie_and_authenticates` and
+`test_bearer_header_still_works_as_a_fallback`).
+
 ### Rate limits
 
-Not yet implemented (Phase 1).
+`POST /auth/login`: 5/minute per IP. `POST /pricing/suggest`: 20/minute per
+IP. Both via `slowapi`, in-memory storage — see §7's vulnerability table
+above for detail. No other endpoints are rate limited yet.
 
 ### Secrets
 
@@ -533,6 +594,13 @@ Honest, current as of Phase 0:
   of default multi-document transactions. See §3 (MongoDB tradeoffs).
 - **Several Tier 2 security issues from the v1 audit are still open** — see
   §7's table. Phase 1 closes these before anything is deployed publicly.
+- **No explicit CSRF token.** Login now uses an `HttpOnly` cookie
+  (§3/§7), mitigated with `SameSite=Lax`, which blocks most forged
+  cross-site requests but isn't as strong as a dedicated CSRF token on
+  state-changing routes. Worth adding before this handles real payments.
+- **No JWT denylist/revocation.** A stolen-but-not-yet-expired token, or a
+  user who wants to "log out everywhere," can't be invalidated early — the
+  token is just valid until its `exp` claim passes. See §3.
 - **No pagination anywhere yet.** Listing and reservation queries use a fixed
   `to_list(length=...)` cap. Fine at seed-data scale, not fine at real scale.
   Phase 5.
