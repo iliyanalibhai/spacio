@@ -9,3 +9,5 @@ python-dotenv==1.0.1
 pydantic[email]==2.8.2
 pydantic-settings==2.4.0
 stripe==10.11.0
+Pillow==12.3.0
+slowapi==0.1.10

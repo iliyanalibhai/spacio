@@ -1,10 +1,11 @@
 from datetime import datetime
+from io import BytesIO
 from typing import List, Optional
 from uuid import uuid4
-import shutil
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from PIL import Image, UnidentifiedImageError
 
 from app.core.paths import UPLOAD_DIR
 from app.deps.auth import get_current_user
@@ -13,6 +14,12 @@ from app.db import get_db
 from app.services.capacity import CAPACITY_HOLDING_STATUSES
 
 router = APIRouter()
+
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+# Keyed by what Pillow reports after actually decoding the file, not by
+# client-supplied Content-Type or filename extension (both are attacker
+# controlled).
+ALLOWED_IMAGE_FORMATS = {"JPEG": ".jpg", "PNG": ".png"}
 
 
 def _size_bucket_for_sqft(sqft: float) -> StorageSize:
@@ -202,18 +209,38 @@ async def upload_image(
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
 ):
-    # NOTE: this trusts the client-supplied Content-Type and enforces no
-    # size limit — a known Tier 2 issue. Phase 1 replaces this with magic-byte
-    # validation, a size cap, and EXIF stripping. See docs/DOCUMENTATION.md §7.
-    if file.content_type not in ("image/jpeg", "image/png"):
+    # Read at most MAX_UPLOAD_BYTES + 1: if the client sends more, this still
+    # only buffers one byte over the cap in memory rather than the whole
+    # (potentially huge) upload before we get a chance to reject it.
+    contents = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Image must be 5MB or smaller")
+
+    try:
+        probe = Image.open(BytesIO(contents))
+        probe.verify()  # decodes just enough to confirm this isn't corrupt/not-an-image
+    except (UnidentifiedImageError, OSError, SyntaxError):
         raise HTTPException(status_code=400, detail="Only JPEG and PNG images are allowed")
 
+    if probe.format not in ALLOWED_IMAGE_FORMATS:
+        raise HTTPException(status_code=400, detail="Only JPEG and PNG images are allowed")
+    image_format = probe.format
+    assert image_format is not None  # narrowed by the `in ALLOWED_IMAGE_FORMATS` check above
+
+    # verify() leaves the Image unusable for further ops, so reopen for the
+    # real decode. Pillow also caps decompressed pixel count by default
+    # (Image.MAX_IMAGE_PIXELS), guarding against decompression-bomb uploads.
+    image: Image.Image = Image.open(BytesIO(contents))
+    if image_format == "JPEG" and image.mode not in ("RGB", "L"):
+        image = image.convert("RGB")
+
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    ext = ".jpg" if file.content_type == "image/jpeg" else ".png"
-    filename = f"{uuid4()}{ext}"
+    filename = f"{uuid4()}{ALLOWED_IMAGE_FORMATS[image_format]}"
     dest = UPLOAD_DIR / filename
 
-    with dest.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # Saving the re-decoded pixel data (instead of writing `contents` to disk
+    # as-is) strips EXIF metadata and any bytes appended after the image data
+    # by the client, since only what Pillow actually decoded gets written.
+    image.save(dest, format=image_format)
 
     return {"url": f"/uploads/{filename}"}
