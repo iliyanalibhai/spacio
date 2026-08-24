@@ -1,5 +1,3 @@
-import json
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 from motor.motor_asyncio import AsyncIOMotorDatabase
 import stripe
@@ -96,19 +94,15 @@ async def get_verification_status(
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request, db: AsyncIOMotorDatabase = Depends(get_db)):
-    # NOTE: this does not verify the Stripe signature yet
-    # (stripe.Webhook.construct_event with STRIPE_WEBHOOK_SECRET). As written,
-    # anyone on the internet can POST a forged identity.verification_session.verified
-    # event with an arbitrary user_id and become a "verified" host. This is a
-    # known Tier 2 vulnerability, fixed in Phase 1 — see docs/DOCUMENTATION.md §7.
-    # Left unverified here (rather than fixed early) to keep Phase 0 scoped to
-    # "the repo runs" and Phase 1 scoped to "the repo is safe to deploy."
     payload = await request.body()
+    signature = request.headers.get("stripe-signature", "")
 
     try:
-        event = stripe.Event.construct_from(json.loads(payload), stripe.api_key)
+        event = stripe.Webhook.construct_event(payload, signature, settings.stripe_webhook_secret)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
 
     if event.type == "identity.verification_session.verified":
         session = event.data.object

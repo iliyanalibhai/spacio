@@ -429,7 +429,7 @@ now so nothing gets silently forgotten between phases.
 
 | Vulnerability | Status |
 |---|---|
-| Stripe webhook signature not verified (`stripe.Event.construct_from` on raw body) | Open — Phase 1 |
+| Stripe webhook signature not verified (`stripe.Event.construct_from` on raw body) | Fixed — see below |
 | `verificationStatus = "verified-mock"` self-attestation bypass at registration | Open — Phase 1 |
 | `cors_origins` defaults to `["*"]` with `allow_credentials=True` | Open — Phase 1 |
 | `jwt_secret` defaults to a literal string instead of failing fast when unset | Open — Phase 1 |
@@ -440,6 +440,11 @@ now so nothing gets silently forgotten between phases.
 
 `GET /listings` now returns a typed response instead of raw documents so
 undocumented fields never leak to unauthenticated callers.
+
+The Stripe webhook now verifies the `stripe-signature` header via
+`stripe.Webhook.construct_event` against `STRIPE_WEBHOOK_SECRET`, rejecting
+forged and unsigned requests with a 400 — see
+`api/tests/test_verification_webhook.py`.
 
 ### Rate limits
 

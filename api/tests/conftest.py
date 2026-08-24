@@ -19,6 +19,7 @@ os.environ.setdefault("DATABASE_NAME", "spacio_test")
 os.environ.setdefault("MONGODB_URI", "mongodb://localhost:27017")
 os.environ.setdefault("JWT_SECRET", "test-secret-do-not-use-in-prod")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
+os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_test_do_not_use_in_prod"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
