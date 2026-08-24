@@ -14,7 +14,6 @@ export function Register() {
     zipCode: "",
     isHost: false,
     phone: "",
-    backgroundCheckAccepted: false,
   });
 
   const startVerification = useMutation({

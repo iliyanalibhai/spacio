@@ -132,7 +132,7 @@ async def test_capacity_rule_rejects_overbooking_across_concurrent_renters(
         "/auth/login",
         data={"username": "second-renter@test.spacio.dev", "password": "password123"},
     )
-    second_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    second_headers = {"Authorization": f"Bearer {login.cookies['access_token']}"}
 
     second = await client.post(
         "/reservations/",

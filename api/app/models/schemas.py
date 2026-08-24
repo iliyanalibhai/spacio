@@ -25,7 +25,6 @@ class UserCreate(BaseModel):
     zipCode: str
     isHost: bool = False
     phone: Optional[str] = None
-    backgroundCheckAccepted: bool = False
 
 
 class UserPublic(BaseModel):
@@ -39,11 +38,6 @@ class UserPublic(BaseModel):
     verificationStatus: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
 
 
 class ListingBase(BaseModel):

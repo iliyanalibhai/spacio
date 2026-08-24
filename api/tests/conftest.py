@@ -27,6 +27,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app.db import ensure_indexes, get_db
+from app.deps.auth import ACCESS_TOKEN_COOKIE
 
 
 @pytest_asyncio.fixture
@@ -53,9 +54,41 @@ async def clean_database():
 async def client(clean_database):
     from main import app
 
+    # slowapi's Limiter keeps its hit counts in an in-memory store that
+    # lives for the whole pytest process (it's attached to the app, which is
+    # a module-level singleton), not per-request or per-test. Without this
+    # reset, tests that log in more than a handful of times across the whole
+    # suite start tripping the real /auth/login rate limit and fail with
+    # unrelated-looking errors.
+    app.state.limiter.reset()
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+async def _register_and_get_token(client, payload: dict) -> str:
+    """Register, log in, and return the raw JWT — pulled off the Set-Cookie
+    header (`login.cookies`), not a JSON body field, since /auth/login no
+    longer returns the token in the body (it's httpOnly-cookie-only now, see
+    docs/DOCUMENTATION.md §7). Tests still use it as a Bearer header (rather
+    than relying on the shared client's cookie jar) because several tests
+    need two authenticated identities live at once on one `client` instance
+    — a single cookie jar can only hold one session at a time, but headers
+    can carry as many identities as a test needs.
+    """
+    await client.post("/auth/register", json=payload)
+    login = await client.post(
+        "/auth/login",
+        data={"username": payload["email"], "password": payload["password"]},
+    )
+    token = login.cookies[ACCESS_TOKEN_COOKIE]
+    # Drop the cookie the login above just set on the shared client so it
+    # doesn't leak into later requests in the same test that forget to pass
+    # an explicit Authorization header — auth in these tests should always
+    # be explicit about which identity is acting.
+    client.cookies.clear()
+    return token
 
 
 @pytest_asyncio.fixture
@@ -67,12 +100,7 @@ async def registered_host(client):
         "zipCode": "78705",
         "isHost": True,
     }
-    await client.post("/auth/register", json=payload)
-    login = await client.post(
-        "/auth/login",
-        data={"username": payload["email"], "password": payload["password"]},
-    )
-    token = login.json()["access_token"]
+    token = await _register_and_get_token(client, payload)
     return {"email": payload["email"], "token": token}
 
 
@@ -96,10 +124,5 @@ async def registered_renter(client):
         "zipCode": "78705",
         "isHost": False,
     }
-    await client.post("/auth/register", json=payload)
-    login = await client.post(
-        "/auth/login",
-        data={"username": payload["email"], "password": payload["password"]},
-    )
-    token = login.json()["access_token"]
+    token = await _register_and_get_token(client, payload)
     return {"email": payload["email"], "token": token}

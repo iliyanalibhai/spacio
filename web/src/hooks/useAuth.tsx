@@ -14,10 +14,9 @@ import type { User } from "../types";
 
 type AuthContextValue = {
   user: User | null;
-  token: string | null;
   login: (email: string, password: string) => Promise<void>;
   register: (input: RegisterPayload) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
   loading: boolean;
   initializing: boolean;
@@ -25,8 +24,6 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
-
-const TOKEN_KEY = "spacio_token";
 
 function errorMessage(err: unknown, fallback: string): string {
   const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data
@@ -36,51 +33,43 @@ function errorMessage(err: unknown, fallback: string): string {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY));
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
+  // The session lives in an httpOnly cookie now, so JS has no way to check
+  // "is there a token?" up front the way the old localStorage read could.
+  // The only way to know is to ask the API and see whether it accepts the
+  // cookie — a 401 here just means "not logged in," not an error.
   const fetchMe = useCallback(async () => {
-    if (!token) {
-      setInitializing(false);
-      return;
-    }
     try {
       const data = await authApi.me();
       setUser(data);
     } catch {
       setUser(null);
-      localStorage.removeItem(TOKEN_KEY);
-      setToken(null);
     } finally {
       setInitializing(false);
     }
-  }, [token]);
+  }, []);
 
   useEffect(() => {
     fetchMe();
   }, [fetchMe]);
 
-  const login = useCallback(
-    async (email: string, password: string) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await authApi.login(email, password);
-        localStorage.setItem(TOKEN_KEY, res.access_token);
-        setToken(res.access_token);
-        await fetchMe();
-      } catch (err) {
-        setError(errorMessage(err, "Login failed"));
-        throw err;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [fetchMe]
-  );
+  const login = useCallback(async (email: string, password: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const loggedInUser = await authApi.login(email, password);
+      setUser(loggedInUser);
+    } catch (err) {
+      setError(errorMessage(err, "Login failed"));
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   const register = useCallback(
     async (input: RegisterPayload) => {
@@ -99,11 +88,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [login]
   );
 
-  const logout = useCallback(() => {
-    localStorage.removeItem(TOKEN_KEY);
-    setToken(null);
-    setUser(null);
-    queryClient.clear();
+  const logout = useCallback(async () => {
+    try {
+      await authApi.logout();
+    } finally {
+      setUser(null);
+      queryClient.clear();
+    }
   }, [queryClient]);
 
   const refreshUser = useCallback(async () => {
@@ -111,8 +102,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [fetchMe]);
 
   const value = useMemo(
-    () => ({ user, token, login, register, logout, refreshUser, loading, initializing, error }),
-    [user, token, login, register, logout, refreshUser, loading, initializing, error]
+    () => ({ user, login, register, logout, refreshUser, loading, initializing, error }),
+    [user, login, register, logout, refreshUser, loading, initializing, error]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

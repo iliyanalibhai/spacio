@@ -3,9 +3,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.core.config import settings
 from app.core.paths import IMAGES_DIR, UPLOAD_DIR
+from app.core.rate_limit import limiter
 from app.db import ensure_indexes
 from app.routers import auth, listings, reservations, messages, pricing, matching, verification
 
@@ -30,6 +34,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.state.limiter = limiter
+# slowapi's handler is typed for its own RateLimitExceeded, narrower than the
+# generic Exception Starlette's add_exception_handler expects — a known
+# slowapi/mypy friction point, not a real type error.
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+app.add_middleware(SlowAPIMiddleware)
 
 
 @app.get("/health")

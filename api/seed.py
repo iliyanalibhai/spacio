@@ -49,10 +49,10 @@ async def seed() -> None:
         "isHost": True,
         "phone": "555-1000",
         "createdAt": now,
-        "backgroundCheckAccepted": True,
-        # Set directly here (not via the registration bypass in auth.py) —
-        # this is a fixture, not a demonstration of the self-attestation
-        # bug that bypass represents.
+        # Set directly on the fixture, bypassing the real Stripe Identity
+        # flow — legitimate for seed data, unlike the removed registration
+        # self-attestation bug this used to demonstrate. See
+        # docs/DOCUMENTATION.md §7.
         "verificationStatus": "verified",
     }
 
@@ -66,7 +66,6 @@ async def seed() -> None:
         "isHost": False,
         "phone": "555-2000",
         "createdAt": now,
-        "backgroundCheckAccepted": False,
         "verificationStatus": "pending",
     }
 

@@ -1,15 +1,17 @@
 from datetime import datetime
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
+from app.core.config import settings
+from app.core.rate_limit import limiter
 from app.core.security import create_access_token, get_password_hash, verify_password
 from app.db import get_db
-from app.deps.auth import get_current_user
-from app.models.schemas import TokenResponse, UserCreate, UserPublic
+from app.deps.auth import ACCESS_TOKEN_COOKIE, get_current_user
+from app.models.schemas import UserCreate, UserPublic
 
 router = APIRouter()
 
@@ -27,13 +29,12 @@ async def register(user: UserCreate, db: AsyncIOMotorDatabase = Depends(get_db))
         "isHost": user.isHost,
         "phone": user.phone,
         "createdAt": now,
-        "backgroundCheckAccepted": user.backgroundCheckAccepted,
-        # NOTE: this self-attestation bypass ("verified-mock" on a checkbox)
-        # defeats the entire point of the Stripe Identity gate on listing
-        # creation. It is a known Tier 2 issue, deleted in Phase 1 — see
-        # docs/DOCUMENTATION.md §7. Not removed here to keep Phase 0 scoped
-        # to "the repo runs", not security fixes.
-        "verificationStatus": "verified-mock" if user.backgroundCheckAccepted else "pending",
+        # The only way this ever becomes "verified" is the real Stripe
+        # Identity flow (app/routers/verification.py: a session started via
+        # POST /verification/create-session, confirmed by the
+        # POST /verification/webhook handler). Registration can never set it
+        # directly — see docs/DOCUMENTATION.md §7.
+        "verificationStatus": "pending",
     }
     try:
         await db.users.insert_one(doc)
@@ -42,8 +43,11 @@ async def register(user: UserCreate, db: AsyncIOMotorDatabase = Depends(get_db))
     return UserPublic.model_validate(doc)
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=UserPublic)
+@limiter.limit("5/minute")
 async def login(
+    request: Request,  # required by @limiter.limit, which reads the caller's IP off it
+    response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
@@ -51,7 +55,29 @@ async def login(
     if not user or not verify_password(form_data.password, user["hashed_password"]):
         raise HTTPException(status_code=400, detail="Incorrect email or password")
     token = create_access_token(subject=user["_id"])
-    return TokenResponse(access_token=token)
+    # httpOnly: page JS can never read this, so an XSS bug can no longer
+    # steal the session by reading it out of localStorage (the old model —
+    # see docs/DOCUMENTATION.md §7). The browser still attaches it
+    # automatically on every request to this API.
+    response.set_cookie(
+        key=ACCESS_TOKEN_COOKIE,
+        value=token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=settings.access_token_expire_minutes * 60,
+        path="/",
+    )
+    return UserPublic.model_validate(user)
+
+
+@router.post("/logout")
+async def logout(response: Response):
+    # JS can't clear an httpOnly cookie itself (that's the point of
+    # httpOnly), so logging out has to be a real request the server
+    # answers by telling the browser to drop it.
+    response.delete_cookie(key=ACCESS_TOKEN_COOKIE, path="/")
+    return {"detail": "Logged out"}
 
 
 @router.get("/me", response_model=UserPublic)

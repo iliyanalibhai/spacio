@@ -1,8 +1,9 @@
 from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.core.rate_limit import limiter
 from app.services.ai_pricing import suggest_price
 
 router = APIRouter()
@@ -24,7 +25,8 @@ class PriceSuggestionResponse(BaseModel):
 
 
 @router.post("/suggest", response_model=PriceSuggestionResponse)
-async def pricing_suggest(payload: PriceSuggestionRequest):
+@limiter.limit("20/minute")
+async def pricing_suggest(request: Request, payload: PriceSuggestionRequest):
     if payload.size is None:
         raise HTTPException(status_code=400, detail="size is required")
     suggested, min_price, max_price, explanation = suggest_price(

@@ -14,7 +14,11 @@ async def test_invalid_token_is_rejected(client):
     assert response.status_code == 401
 
 
-async def test_register_then_me_roundtrip(client):
+async def test_register_then_login_sets_httponly_cookie_and_authenticates(client):
+    """The core of the JWT-storage fix (docs/DOCUMENTATION.md §7): login sets
+    an httpOnly cookie instead of returning the token in the JSON body, so
+    page JS can never read it out of a persistent store the way it could
+    when the token lived in localStorage."""
     payload = {
         "name": "Jane",
         "email": "jane@test.spacio.dev",
@@ -29,11 +33,25 @@ async def test_register_then_me_roundtrip(client):
         "/auth/login", data={"username": payload["email"], "password": payload["password"]}
     )
     assert login.status_code == 200
-    token = login.json()["access_token"]
+    assert "access_token" in login.cookies
+    assert "access_token" not in login.json()
 
-    me = await client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+    # No Authorization header attached: httpx's client, like a real browser,
+    # already holds the cookie set above and sends it automatically.
+    me = await client.get("/auth/me")
     assert me.status_code == 200
     assert me.json()["email"] == payload["email"]
+
+
+async def test_bearer_header_still_works_as_a_fallback(client, registered_renter):
+    """Non-browser callers (scripts, this test suite's other fixtures) that
+    can't rely on cookie storage can still authenticate with a bearer token
+    directly, as long as it's a real token minted by /auth/login — the
+    cookie is the primary mechanism for browsers, not the only one."""
+    headers = {"Authorization": f"Bearer {registered_renter['token']}"}
+    me = await client.get("/auth/me", headers=headers)
+    assert me.status_code == 200
+    assert me.json()["email"] == registered_renter["email"]
 
 
 async def test_duplicate_email_registration_rejected(client):
@@ -52,6 +70,47 @@ async def test_duplicate_email_registration_rejected(client):
 
 async def test_non_host_cannot_create_listing(client, registered_renter):
     headers = {"Authorization": f"Bearer {registered_renter['token']}"}
+    response = await client.post(
+        "/listings/",
+        headers=headers,
+        json={
+            "title": "Test",
+            "description": "Test",
+            "size": "M",
+            "sizeSqft": 100,
+            "pricePerMonth": 40,
+            "addressSummary": "Austin, TX",
+            "zipCode": "78705",
+            "availableFrom": "2026-01-01",
+            "availableTo": "2026-12-31",
+        },
+    )
+    assert response.status_code == 403
+
+
+async def test_registration_cannot_self_attest_verification(client):
+    """Regression test for a removed Tier 2 bug: registration used to accept
+    a client-supplied `backgroundCheckAccepted` flag and set
+    verificationStatus to "verified-mock" for it, bypassing the real Stripe
+    Identity flow entirely. Registration must never set anything but
+    "pending", regardless of what the client sends. See
+    docs/DOCUMENTATION.md §7."""
+    payload = {
+        "name": "Attacker",
+        "email": "attacker@test.spacio.dev",
+        "password": "password123",
+        "zipCode": "78705",
+        "isHost": True,
+        "backgroundCheckAccepted": True,
+    }
+    register = await client.post("/auth/register", json=payload)
+    assert register.status_code == 201
+    assert register.json()["verificationStatus"] == "pending"
+
+    login = await client.post(
+        "/auth/login", data={"username": payload["email"], "password": payload["password"]}
+    )
+    headers = {"Authorization": f"Bearer {login.cookies['access_token']}"}
     response = await client.post(
         "/listings/",
         headers=headers,
@@ -216,7 +275,7 @@ async def test_cannot_message_reservation_you_are_not_part_of(client, verified_h
         "/auth/login",
         data={"username": "stranger@test.spacio.dev", "password": "password123"},
     )
-    stranger_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    stranger_headers = {"Authorization": f"Bearer {login.cookies['access_token']}"}
 
     read = await client.get(f"/messages/{reservation_id}", headers=stranger_headers)
     assert read.status_code == 403

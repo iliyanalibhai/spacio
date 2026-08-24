@@ -8,7 +8,6 @@ export type RegisterPayload = {
   zipCode: string;
   isHost: boolean;
   phone?: string;
-  backgroundCheckAccepted?: boolean;
 };
 
 export async function register(payload: RegisterPayload): Promise<User> {
@@ -16,14 +15,23 @@ export async function register(payload: RegisterPayload): Promise<User> {
   return data;
 }
 
-export async function login(email: string, password: string) {
+export async function login(email: string, password: string): Promise<User> {
   const body = new URLSearchParams();
   body.append("username", email);
   body.append("password", password);
-  const { data } = await api.post("/auth/login", body, {
+  // The backend sets the session as an httpOnly cookie on this response
+  // (JS can't read it, which is the whole point); the body just carries the
+  // logged-in user's profile so the UI has something to render immediately.
+  const { data } = await api.post<User>("/auth/login", body, {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
   });
-  return data as { access_token: string; token_type: string };
+  return data;
+}
+
+export async function logout(): Promise<void> {
+  // Only the server can clear an httpOnly cookie — there's no client-side
+  // equivalent of localStorage.removeItem() for it.
+  await api.post("/auth/logout");
 }
 
 export async function me(): Promise<User> {
