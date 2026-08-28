@@ -37,6 +37,7 @@ export function CreateListingForm() {
         size: form.sizeSqft <= 60 ? "S" : form.sizeSqft <= 150 ? "M" : "L",
         zipCode: form.zipCode,
         indoor,
+        sizeSqft: form.sizeSqft,
         title: form.title,
         description: form.description,
       }),

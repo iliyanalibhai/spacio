@@ -11,3 +11,10 @@ pydantic-settings==2.4.0
 stripe==10.11.0
 Pillow==12.3.0
 slowapi==0.1.10
+# Pricing model (app/ml/): LightGBM quantile regressors trained on synthetic
+# comps data, loaded via joblib. scikit-learn is needed for LightGBM's
+# sklearn API (LGBMRegressor) and for training-time metrics/splitting.
+lightgbm==4.7.0
+pandas==3.0.5
+scikit-learn==1.9.0
+joblib==1.5.3

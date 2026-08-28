@@ -4,6 +4,7 @@ export async function suggestPrice(input: {
   size: "S" | "M" | "L";
   zipCode: string;
   indoor?: boolean;
+  sizeSqft?: number;
   title?: string;
   description?: string;
 }) {

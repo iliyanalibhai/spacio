@@ -202,24 +202,31 @@ seconds; the frontend polls `/verification/status` to compensate (see
 **Revisit if:** Stripe Identity pricing or coverage becomes a blocker in a
 target market.
 
-### Pricing model (heuristic today, real model in Phase 3)
+### Pricing model (real model as of Phase 2)
 
 **What:** `/pricing/suggest` returns a suggested monthly price for a new
-listing, currently from a deterministic heuristic in
-`api/app/services/ai_pricing.py`.
-**Why heuristic for now:** There is no booking history yet to train a real
-model on, and a fabricated "AI" that silently randomizes its output (the v1
-prototype's behavior) is worse than an honestly-labeled placeholder. Phase 3
-replaces this with a real gradient-boosted quantile regressor trained on a
-clearly-labeled synthetic comps dataset (see §6 once that lands).
-**Alternatives considered:** Shipping no price suggestion at all until Phase
-3. Rejected because the create-listing flow benefits from *some* default
-even if approximate, as long as it's honestly described as an estimate and
-never presented as based on real comparable bookings we don't have yet.
-**Tradeoffs accepted:** The current heuristic is not a substitute for a real
-model and must never be described as one in any user-facing copy. See §6 for
-the full accounting of what's real versus placeholder.
-**Revisit if:** Phase 3 lands (tracked in §10 decision log).
+listing from a trained model — three LightGBM quantile regressors
+(`api/app/services/ai_pricing.py`, `app/ml/`) — replacing the Phase 0/1
+deterministic heuristic.
+**Why a real model now:** Phase 0/1 shipped a deterministic heuristic
+instead of a trained model because there was no booking history to train on
+— a fabricated "AI" that silently randomizes its output (the v1 prototype's
+behavior) is worse than an honestly-labeled placeholder. Phase 2 replaces
+that placeholder with a real gradient-boosted quantile regressor trained on
+a clearly-labeled *synthetic* comps dataset — still not real booking data
+(there still isn't any), but a genuine trained model rather than a fixed
+formula. Full write-up in §6.
+**Alternatives considered:** Waiting for real booking history before
+training anything. Rejected for the same reason the heuristic shipped early
+in Phase 0/1: the create-listing flow benefits from a real estimate now, as
+long as the synthetic training data is stated plainly and never described
+as real comps.
+**Tradeoffs accepted:** Real accuracy on actual bookings is unknown — the
+model's evaluated MAE (§6) only measures how well it recovered a synthetic
+formula, not real-world pricing behavior. Must be retrained on real booking
+history once Spacio has enough of it.
+**Revisit if:** Real booking/listing-price history accumulates (tracked in
+§10 decision log).
 
 ### Embeddings / semantic search
 
@@ -403,12 +410,102 @@ a timer until Phase 4.
 
 ## 6. The pricing model
 
-Not yet built. This section will be completed in Phase 3 with: feature list
-and rationale, training data provenance (synthetic, stated plainly), model
-type and why, evaluation against a naive per-ZIP-per-sqft baseline with real
-MAE numbers, artifact versioning, and known limitations. Until then, "AI
-pricing" in the product means the labeled placeholder heuristic described in
-§3.
+**Built in Phase 2 (2026-08-27).** `POST /pricing/suggest` is now served by
+`app/services/ai_pricing.py`, backed by a real trained model rather than the
+Phase 0/1 deterministic heuristic (`BASE_PRICES_BY_SIZE` etc., retired — see
+git history if you need it).
+
+**Training data provenance — synthetic, stated plainly.** Spacio has no real
+booking or listing-price history yet, so there is nothing real to train on.
+`app/ml/synthetic_pricing_data.py` generates 8,000 synthetic comp rows from
+an explicit, documented generative formula (per-tier $/sqft rate, sublinear
+sqft scaling, an indoor multiplier, log-normal noise, and a 5% chance of a
+±25% outlier), seeded (`seed=42`) for full reproducibility. This formula is
+deliberately *not* the same as the old heuristic it replaces — if it were,
+the model would just be re-deriving a formula it was implicitly handed,
+which would make the baseline comparison below circular. Every user-facing
+`explanation` string returned by `/pricing/suggest` says "trained on
+synthetic data, not real booking history" — this must never be softened to
+imply the model is trained on real comps.
+
+**Feature list and rationale** (`app/ml/features.py`, the single source of
+truth for encoding — shared by training and inference so they can't drift
+apart):
+
+| Feature | Type | Rationale |
+|---|---|---|
+| `size` | categorical (S/M/L) | The bucket the host picks in `CreateListingForm`; kept even though `sizeSqft` is more granular because it's still part of the request contract and the frontend derives it from sqft either way. |
+| `sizeSqft` | numeric | The real driver of cost. Previously collected in the create-listing form but never sent to `/pricing/suggest` — now included in `PriceSuggestionRequest`. |
+| `zip_demand_tier` | categorical (low/mid/high) | Derived from the ZIP3 prefix via a hand-labeled table in `features.py`, expanding the old heuristic's binary `HIGH_DEMAND_ZIP_PREFIXES` flag into 3 tiers. Still not real demand data (no bookings to derive it from) — same honesty caveat as before, just less crude. |
+| `indoor` | boolean | Collected in the create-listing form (`indoor` state in `CreateListingForm.tsx`), not persisted on the listing itself — a transient pricing-suggestion input only. |
+
+`title`/`description` are accepted by `PriceSuggestionRequest` but not used
+as model features — turning free text into a numeric signal (e.g. via
+embeddings) is exactly the kind of thing Phase 2's matching-model follow-up
+covers, not this pricing model; using them here without that machinery
+would just be noise.
+
+**Model type and why:** three independent LightGBM quantile regressors
+(`objective="quantile"`, `alpha` = 0.15 / 0.5 / 0.85), trained via
+`app/ml/train_pricing_model.py`. Quantile regression was chosen over a
+single point-estimate model because the product needs a `min`/`suggested`/
+`max` spread, not just one number — the old heuristic faked that spread with
+a fixed ±15% multiplier; the real model produces genuine p15/p50/p85
+estimates instead. Gradient-boosted trees (vs. e.g. linear regression) were
+chosen because the generative formula has a real nonlinearity (sublinear
+sqft scaling) and a tier × indoor interaction that a linear model can't
+capture, and because LightGBM handles the categorical features (`size`,
+`zip_demand_tier`) natively without one-hot encoding. Hyperparameters
+(`n_estimators=300`, `num_leaves=15`, `max_depth=5`, `learning_rate=0.05`)
+are a reasonable default for a dataset this size, not results of formal
+tuning — worth revisiting once real data replaces the synthetic set.
+
+**Evaluation against a naive baseline, real numbers** (from the training run
+that produced the committed artifact; reproduce with `python -m
+app.ml.train_pricing_model` from `api/`):
+
+| | MAE (held-out 1,600 rows) |
+|---|---|
+| Naive per-ZIP-tier $/sqft baseline | $10.28 |
+| Trained model (median/p50) | $2.36 |
+| Improvement | 77.1% |
+
+The naive baseline (`_naive_baseline_mae` in `train_pricing_model.py`)
+predicts `price = (mean training $/sqft for that ZIP tier) × sqft` — it
+captures the ZIP/tier signal but none of the sqft-scaling, indoor premium,
+or interaction effects, so a large model win here mostly confirms the
+synthetic data actually has learnable structure beyond a flat per-sqft rate,
+not that the model would perform this well on real bookings.
+
+**Artifact versioning:** the trained bundle (all three quantile models plus
+metadata: feature columns, training timestamp, seed, LightGBM version, and
+the metrics table above) is serialized with `joblib` to
+`app/ml/artifacts/pricing_model_v1.joblib` and **committed to the repo** —
+training is fully deterministic given the fixed seed, so committing the
+artifact (rather than training at deploy time) keeps `docker compose up` and
+a fresh clone working out of the box. `ai_pricing.py` loads a pinned
+filename (`pricing_model_v1.joblib`); bump `VERSION` in
+`train_pricing_model.py` and the loaded filename in `ai_pricing.py` together
+whenever a feature-set or encoding change would make an old artifact
+incompatible, so the two files can't silently drift onto different
+contracts.
+
+**Known limitations:**
+- Trained entirely on synthetic data — real predictive accuracy on actual
+  bookings is unknown and likely worse than the $2.36 MAE above, which only
+  measures how well the model recovered a formula we wrote ourselves.
+  Retrain on real booking history once Spacio has enough of it.
+- The `zip_demand_tier` table is still a small hand-labeled list of Texas
+  metro ZIP3 prefixes, same limitation as the old heuristic's ZIP list, just
+  less coarse.
+- No hyperparameter tuning; no cross-validation, just a single train/test
+  split.
+- Output is no longer clipped to the old fixed $25–70 heuristic band (see
+  §11) — a small, low-demand, outdoor unit can now legitimately be
+  suggested below $25/mo, which is more honest than an artificially fixed
+  floor but is a behavior change worth knowing about.
+- `title`/`description` are accepted by the endpoint but unused by the
+  model (see feature table above).
 
 ## 7. Security
 
@@ -573,8 +670,19 @@ that supersedes it and say why.
   reload, matching how they're run natively — this is a dev compose file, not
   a production build. `api/.dockerignore` excludes `.env` and `.venv` so
   secrets and the host virtualenv are never baked into the image layer.
-
-## 11. Known limitations & next steps
+- **2026-08-27** — Phase 2 (real pricing model): chose LightGBM over
+  scikit-learn's built-in gradient boosting for the quantile regressors —
+  both would have been legitimate, sklearn's `HistGradientBoostingRegressor`
+  keeps the dependency footprint lighter, but LightGBM is the more
+  industry-standard answer and its native categorical-feature handling fit
+  `size`/`zip_demand_tier` cleanly. Also decided to commit the trained model
+  artifact (`app/ml/artifacts/pricing_model_v1.joblib`) to the repo rather
+  than training it at deploy time, since training is fully deterministic
+  given the fixed seed — same reasoning as committing `docker-compose.yml`:
+  keep a fresh clone working out of the box. Also locked in **Phase 5:
+  deployment infra (EC2 running the API, S3 for listing/verification
+  images)**, scheduled after Phase 2/3 feature work rather than before, so
+  infra spend doesn't start while the feature set is still moving.
 
 Honest, current as of Phase 0:
 
@@ -585,10 +693,13 @@ Honest, current as of Phase 0:
 - **No review system.** Listings no longer get a fabricated `4.7` rating
   (the v1 default), but there's also no way to earn a real one yet — `rating`
   is `null` until Phase 4 ships reviews.
-- **Pricing suggestions are a labeled heuristic, not a trained model.** See
-  §6. Phase 3 replaces this.
+- **Pricing suggestions are a real trained model, but trained entirely on
+  synthetic data** — there's still no real booking history. See §6 for the
+  full limitations list; must be retrained once real data exists.
 - **Search is ZIP-prefix matching, not real geography.** No map, no
-  `$near` queries. Phase 3.
+  `$near` queries.
+- **Matching is still a keyword heuristic**, not the embeddings-based
+  semantic search planned for later in Phase 2 (`services/matching.py`).
 - **Theoretical race condition in the capacity check** under concurrent
   bookings for the same listing and overlapping dates, due to MongoDB's lack
   of default multi-document transactions. See §3 (MongoDB tradeoffs).

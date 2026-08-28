@@ -13,6 +13,7 @@ class PriceSuggestionRequest(BaseModel):
     size: Literal["S", "M", "L"] = Field(..., description="Size bucket")
     zipCode: str
     indoor: Optional[bool] = False
+    sizeSqft: Optional[float] = None
     title: Optional[str] = None
     description: Optional[str] = None
 
@@ -33,6 +34,7 @@ async def pricing_suggest(request: Request, payload: PriceSuggestionRequest):
         size=payload.size,
         zip_code=payload.zipCode,
         indoor=payload.indoor,
+        size_sqft=payload.sizeSqft,
     )
     return PriceSuggestionResponse(
         suggestedPrice=suggested,
