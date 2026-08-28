@@ -20,6 +20,12 @@ os.environ.setdefault("MONGODB_URI", "mongodb://localhost:27017")
 os.environ.setdefault("JWT_SECRET", "test-secret-do-not-use-in-prod")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
 os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_test_do_not_use_in_prod"
+# Keep the sentence-transformers model out of the default test run (no
+# ~90 MB download, no ~1 s load, no torch import). Only test_matching.py's
+# real-model cases opt back in — its `real_embeddings` fixture flips
+# settings.embeddings_enabled True for the duration of the test. Everything
+# else exercises the non-semantic fallback path in /matching/recommend.
+os.environ.setdefault("EMBEDDINGS_ENABLED", "false")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

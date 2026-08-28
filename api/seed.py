@@ -21,6 +21,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.core.config import settings
 from app.core.security import get_password_hash
+from app.ml.embeddings import listing_text, safe_embed_one
 
 SEED_SOURCE = "seed.py"
 
@@ -165,6 +166,13 @@ async def seed() -> None:
         }
         for listing in listings
     ]
+
+    # Precompute the semantic-search embedding for each seeded listing, the
+    # same way the create-listing endpoint does. safe_embed_one never
+    # raises: if the model can't load, embedding is left None and
+    # /matching/recommend backfills it on the first search.
+    for doc in listing_docs:
+        doc["embedding"] = safe_embed_one(listing_text(doc))
 
     await db.users.insert_one(host)
     await db.users.insert_one(renter)

@@ -9,6 +9,7 @@ from PIL import Image, UnidentifiedImageError
 
 from app.core.paths import UPLOAD_DIR
 from app.deps.auth import get_current_user
+from app.ml.embeddings import listing_text, safe_embed_one
 from app.models.schemas import ListingCreate, ListingPublic, ListingUpdate, StorageSize
 from app.db import get_db
 from app.services.capacity import CAPACITY_HOLDING_STATUSES
@@ -61,8 +62,14 @@ async def create_listing(
         # with no review system behind it). Real ratings arrive with the
         # Phase 4 review system; until then this is genuinely null.
         "rating": None,
+        # Sentence embedding of title + description, used by
+        # /matching/recommend for semantic search. None if embeddings are
+        # disabled or the model is unavailable — /matching/recommend
+        # backfills it lazily in that case. See app/ml/embeddings.py.
+        "embedding": None,
         "createdAt": now,
     }
+    doc["embedding"] = safe_embed_one(listing_text(doc))
     await db.listings.insert_one(doc)
     return ListingPublic.model_validate(doc)
 
@@ -183,6 +190,11 @@ async def update_listing(
         updates["size"] = _size_bucket_for_sqft(updates["sizeSqft"])
     if not updates:
         return ListingPublic.model_validate(listing)
+
+    # The embedding is derived from title + description, so it goes stale
+    # whenever either changes. Recompute from the merged document.
+    if "title" in updates or "description" in updates:
+        updates["embedding"] = safe_embed_one(listing_text({**listing, **updates}))
 
     await db.listings.update_one({"_id": listing_id}, {"$set": updates})
     listing.update(updates)

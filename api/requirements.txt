@@ -1,3 +1,11 @@
+# Pull torch from PyTorch's CPU-only wheel index. For the same version
+# number, pip ranks the index's `2.13.0+cpu` linux wheel above PyPI's
+# CUDA-bundled `2.13.0` (a local-version segment sorts higher under PEP
+# 440), so `torch==2.13.0` below resolves to the ~200 MB CPU build instead
+# of the ~2.5 GB CUDA one. On macOS the index serves the normal arm64
+# wheel, so dev installs are unaffected. See docs/DOCUMENTATION.md §3.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
 # Motor/pymongo compatibility (avoids _QUERY_OPTIONS import error)
@@ -18,3 +26,8 @@ lightgbm==4.7.0
 pandas==3.0.5
 scikit-learn==1.9.0
 joblib==1.5.3
+# Semantic listing matching (app/ml/embeddings.py, app/services/matching.py):
+# all-MiniLM-L6-v2 sentence embeddings. sentence-transformers pulls in torch
+# + transformers; torch comes from the CPU wheel index configured above.
+sentence-transformers==6.0.0
+torch==2.13.0

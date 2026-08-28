@@ -24,7 +24,8 @@ flowchart LR
 
     subgraph Backend
         API["api (FastAPI)"]
-        Pricing["pricing service<br/>(ml/, Phase 3)"]
+        Pricing["pricing model<br/>(app/ml/, LightGBM)"]
+        Matching["matching<br/>(app/ml/, MiniLM embeddings)"]
     end
 
     subgraph Data
@@ -39,7 +40,8 @@ flowchart LR
     API -- "Motor (async)" --> Mongo
     API -- "verification sessions + webhooks" --> Stripe
     API -- "price suggestion request" --> Pricing
-    Pricing -- "reads comps / model artifact" --> Mongo
+    API -- "free-text Smart Match query" --> Matching
+    Matching -- "reads / backfills listing embeddings" --> Mongo
 ```
 
 ### Request flow: creating a booking
@@ -230,10 +232,81 @@ history once Spacio has enough of it.
 
 ### Embeddings / semantic search
 
-**Not yet implemented.** Planned for Phase 3: `sentence-transformers/all-MiniLM-L6-v2`
-over listing title + description, reranked by distance, price, and
-availability, replacing the v1 prototype's 12-word keyword dictionary. Will
-be documented here in full once built.
+**Built in Phase 2 (2026-08-27).** `POST /matching/recommend` ("Smart
+Match") is now real semantic search, replacing the v1 prototype's ~12-word
+keyword dictionary (`KEYWORD_SIZE_HINTS`).
+
+**How it works:**
+
+- **Model:** `sentence-transformers/all-MiniLM-L6-v2` — a 6-layer distilled
+  BERT, ~22M params, 384-dimensional output. Small enough to run on CPU on
+  a modest box; widely benchmarked. Loaded once per process, lazily, on
+  first use (`app/ml/embeddings.py`).
+- **Indexing:** each listing's `title` + `description` is embedded into a
+  unit vector when the listing is created or edited (`app/routers/listings.py`),
+  stored on the listing document as `embedding` (§4). Listings that predate
+  the feature, or were written while the model was unavailable, are
+  embedded and persisted lazily the first time `/matching/recommend` sees
+  them (`_ensure_listing_embeddings`).
+- **Query time:** the renter's free-text query is embedded the same way,
+  then scored against every listing vector by **cosine similarity** — which,
+  because all vectors are L2-normalized, is just a dot product. This is the
+  dominant ranking signal.
+- **Reranking:** the semantic score is then nudged by the structured
+  signals — exact ZIP match (+0.15) or ZIP3-prefix match (+0.07), a small
+  price term (≤0.08, favouring cheaper), and, if the caller passes dates, an
+  availability-window fit bonus / miss penalty. Weights live as named
+  constants at the top of `app/services/matching.py`; they're deliberately
+  small so a far-away exact-text match never outranks a nearby near-match,
+  but they break ties among similarly-relevant listings. Not formally tuned
+  — there's no labelled relevance data to tune against (see limitations).
+- **Why "bicycle" now finds "great for cyclists":** the keyword version
+  matched substrings, so a query and a listing that meant the same thing
+  but shared no words scored zero. Embeddings place text near other text
+  with similar *meaning*, so synonyms, paraphrases and descriptions
+  ("somewhere for my road bike") all land close to a listing that says
+  "ideal for cyclists".
+
+**Design choices:**
+
+- `app/services/matching.py` is pure and model-free: it takes the query
+  vector and listings that already carry an `embedding`, and does nothing
+  but arithmetic. It never imports torch, so it unit-tests instantly with
+  hand-built toy vectors (`tests/test_matching.py::TestRanking`). Producing
+  the vectors is the router's job.
+- **Brute-force comparison, no ANN index.** `/matching/recommend` loads all
+  listings and scores them in a loop. At Spacio's scale (hundreds of
+  listings) this is trivially fast and an approximate-nearest-neighbour
+  index (FAISS, `pgvector`, Atlas Vector Search) would be premature. This is
+  the obvious thing to revisit if the listing count grows by orders of
+  magnitude.
+- **Graceful degradation.** `EMBEDDINGS_ENABLED=false` (or any model
+  load/download failure) makes `/matching/recommend` fall back to a
+  non-semantic ranking (ZIP + price only), and its `explanation` string
+  says so rather than pretending the results are semantically ranked. The
+  test suite sets `EMBEDDINGS_ENABLED=false` so the ~90MB download and ~1s
+  load don't happen for the ~76 tests that have nothing to do with
+  matching; `tests/test_matching.py::TestRealEmbeddings` opts back in and
+  exercises the real model end-to-end.
+- **Dependency cost, accepted.** `sentence-transformers` pulls in `torch` +
+  `transformers`. `requirements.txt` uses PyTorch's CPU wheel index so the
+  install is the ~200MB CPU build, not the ~2.5GB CUDA one (see the comment
+  at the top of that file); the Dockerfile bakes the model into the image
+  so the first search after a deploy doesn't block on a download. A lighter
+  ONNX-based embedder (`fastembed`) was considered; `sentence-transformers`
+  was chosen as the more standard, recognizable API (see §10).
+
+**Known limitations:**
+
+- **No relevance evaluation.** We can show that "bicycle" now matches a
+  "cyclists" listing (there's a test), but there's no labelled "good match"
+  dataset, so there's no precision@k number here — same honesty caveat as
+  the pricing model's synthetic-data MAE.
+- Rerank weights are hand-set, not tuned.
+- Brute-force scan; no ANN index (fine at current scale).
+- The query is embedded on every request (~10–50ms on CPU); not cached.
+- Matching still doesn't understand geography — ZIP is string matching, not
+  distance (§11).
 
 ### Hosting
 
@@ -284,6 +357,7 @@ creating a duplicate account.
 | `availableFrom`, `availableTo` | datetime \| null | |
 | `bookingDeadline` | datetime \| null | |
 | `rating` | float \| null | **Fabricated in v1** (hardcoded 4.7 on every listing); Phase 4 replaces this with a real review system. Until then, new listings do not get a fake default (see §11). |
+| `embedding` | float[384] \| null | Sentence embedding of `title` + `description` (`all-MiniLM-L6-v2`), used by `/matching/recommend` for semantic search (§3). Written on listing create/update; `null` if embeddings were disabled or the model was unavailable at write time, in which case `/matching/recommend` backfills it lazily on the next search. Never returned in API responses. |
 | `createdAt` | datetime | |
 
 ### `reservations`
@@ -440,10 +514,11 @@ apart):
 | `indoor` | boolean | Collected in the create-listing form (`indoor` state in `CreateListingForm.tsx`), not persisted on the listing itself — a transient pricing-suggestion input only. |
 
 `title`/`description` are accepted by `PriceSuggestionRequest` but not used
-as model features — turning free text into a numeric signal (e.g. via
-embeddings) is exactly the kind of thing Phase 2's matching-model follow-up
-covers, not this pricing model; using them here without that machinery
-would just be noise.
+as model features. Free text is turned into a numeric signal by the Phase 2
+matching model (§3, sentence embeddings) — but that's for ranking listings
+against a query, not pricing. Feeding raw text embeddings into this
+regressor without a reason to think description wording predicts price
+would just add noise; revisit if real data shows otherwise.
 
 **Model type and why:** three independent LightGBM quantile regressors
 (`objective="quantile"`, `alpha` = 0.15 / 0.5 / 0.85), trained via
@@ -683,6 +758,20 @@ that supersedes it and say why.
   deployment infra (EC2 running the API, S3 for listing/verification
   images)**, scheduled after Phase 2/3 feature work rather than before, so
   infra spend doesn't start while the feature set is still moving.
+- **2026-08-28** — Phase 2 (semantic matching): replaced the keyword
+  dictionary in `services/matching.py` with sentence-embedding search
+  (§3). Chose `sentence-transformers` + `all-MiniLM-L6-v2` over the lighter
+  ONNX-based `fastembed` (same model family, ~20MB of deps vs ~1GB) and
+  over static-embedding `model2vec`: the heavier option was taken for the
+  more standard, widely-recognized API, mitigated by pinning the CPU-only
+  torch build (`requirements.txt` extra index) and baking the model into
+  the Docker image. Kept `matching.py` a pure function of precomputed
+  vectors (no torch import) so it stays fast to unit-test. Did **not** add
+  an ANN index — brute-force scan is fine at hundreds of listings; revisit
+  at scale. Embeddings stored per-listing on write, backfilled lazily on
+  read; `EMBEDDINGS_ENABLED=false` disables the model for the test suite
+  and degrades `/matching/recommend` to a ZIP+price ranking rather than
+  failing.
 
 Honest, current as of Phase 0:
 
@@ -697,9 +786,12 @@ Honest, current as of Phase 0:
   synthetic data** — there's still no real booking history. See §6 for the
   full limitations list; must be retrained once real data exists.
 - **Search is ZIP-prefix matching, not real geography.** No map, no
-  `$near` queries.
-- **Matching is still a keyword heuristic**, not the embeddings-based
-  semantic search planned for later in Phase 2 (`services/matching.py`).
+  `$near` queries. This applies to the Smart Match reranker too — it boosts
+  exact/ZIP3 matches but has no notion of distance.
+- **Smart Match has no relevance evaluation.** It's real semantic search as
+  of Phase 2 (§3), but there's no labelled match-quality dataset, so its
+  rerank weights are hand-set and there's no precision@k number — same
+  honesty caveat as the pricing model's synthetic MAE.
 - **Theoretical race condition in the capacity check** under concurrent
   bookings for the same listing and overlapping dates, due to MongoDB's lack
   of default multi-document transactions. See §3 (MongoDB tradeoffs).

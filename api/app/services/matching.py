@@ -1,97 +1,189 @@
-"""Free-text listing matching.
+"""Free-text listing matching — semantic search over listing text.
 
-This is a keyword-lookup heuristic, not semantic search. Phase 3 replaces it
-with embeddings (sentence-transformers/all-MiniLM-L6-v2) over listing title
-+ description, reranked by distance, price, and availability — see
-docs/DOCUMENTATION.md §3 and §11. Ported from v1 largely as-is since it's
-functionally honest about what it does (no fabricated "AI" claims to fix
-here, unlike ai_pricing.py).
+A renter describes what they need to store ("a road bike and a few boxes
+over winter") and this ranks listings by how close that description is, in
+meaning, to each listing's own title + description — then nudges the order
+with the structured signals (ZIP, price, availability).
+
+The semantic part is done with sentence embeddings (see
+`app/ml/embeddings.py`): every listing's text and the query are turned into
+384-dimensional unit vectors by `all-MiniLM-L6-v2`, and their cosine
+similarity (a dot product, since the vectors are normalized) is the
+relevance score. Unlike the keyword dictionary this replaced, "bicycle",
+"cycling gear" and "somewhere for my bike" all land near a listing that
+says "great for cyclists" even with no shared words.
+
+This module is deliberately pure and model-free: it takes the query vector
+and listings that already carry an `embedding`, and does nothing but
+arithmetic — so it unit-tests with hand-built vectors and never imports
+torch. Producing the vectors (and lazily backfilling listings that predate
+this feature) is the router's job.
+
+When `query_vector` is None — embeddings disabled, or the model failed to
+load — `match_listings` still returns a sane ordering from the structured
+signals alone, and its explanation string says the semantic ranking was
+unavailable rather than pretending otherwise.
 """
 
-import re
-from typing import Dict, List
+from __future__ import annotations
 
-SizeBuckets = {"S": (0, 60), "M": (60, 150), "L": (150, 1_000)}
+from datetime import date, datetime
+from typing import Optional, Sequence
 
-KEYWORD_SIZE_HINTS: Dict[str, float] = {
-    "small": 40,
-    "medium": 80,
-    "large": 200,
-    "box": 30,
-    "boxes": 60,
-    "bike": 50,
-    "bikes": 70,
-    "furniture": 180,
-    "couch": 150,
-    "sofa": 150,
-    "bed": 120,
-}
+import numpy as np
 
+# Relative weights of the ranking signals. The semantic score is a cosine
+# similarity in roughly [0.0, 0.8] for related text; the others are small
+# additive nudges so that, among listings of similar relevance, a local /
+# cheaper / available one wins — without a far-away exact-text match ever
+# outranking a close-by near-match. Tune here, not in the router.
+SEMANTIC_WEIGHT = 1.0
+EXACT_ZIP_BONUS = 0.15
+ZIP3_PREFIX_BONUS = 0.07
+PRICE_WEIGHT = 0.08  # max contribution, for a nominally free listing
+DATE_FIT_BONUS = 0.05
+DATE_MISS_PENALTY = -0.5
 
-def _estimate_sqft_from_query(query: str) -> float:
-    q = query.lower()
-    estimate = 80.0
-    for word, sqft in KEYWORD_SIZE_HINTS.items():
-        if word in q:
-            estimate = max(estimate, sqft)
-    nums = re.findall(r"\d+", q)
-    if nums:
-        count = max(int(n) for n in nums)
-        estimate = max(estimate, min(200, count * 8))
-    return estimate
+TOP_N_DEFAULT = 5
 
 
-def _bucket_from_sqft(sqft: float) -> str:
-    if sqft <= 60:
-        return "S"
-    if sqft <= 150:
-        return "M"
-    return "L"
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    """Cosine similarity, safe against zero vectors. Inputs are expected to
+    be unit vectors already (embeddings.embed normalizes), so this is
+    essentially a dot product; the norm division just guards against a
+    stray un-normalized or empty vector."""
+    av = np.asarray(a, dtype=np.float32)
+    bv = np.asarray(b, dtype=np.float32)
+    if av.size == 0 or bv.size == 0 or av.shape != bv.shape:
+        return 0.0
+    denom = float(np.linalg.norm(av) * np.linalg.norm(bv))
+    if denom == 0.0:
+        return 0.0
+    return float(np.dot(av, bv) / denom)
+
+
+def _price_score(listing: dict) -> float:
+    price = listing.get("pricePerMonth") or 0.0
+    if price <= 0:
+        return PRICE_WEIGHT
+    # Smoothly decreasing: ~half weight around $50/mo, tending to 0 as
+    # price grows. Bounded by PRICE_WEIGHT so it can only ever be a nudge.
+    return PRICE_WEIGHT * (50.0 / (50.0 + float(price)))
+
+
+def _as_date(value: object) -> Optional[date]:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            return None
+    return None
+
+
+def _date_fit_score(
+    listing: dict, want_from: Optional[date], want_to: Optional[date]
+) -> float:
+    """Reward listings whose availability window covers the requested dates,
+    penalize ones that clearly don't. Neutral (0.0) when the caller gave no
+    dates or the listing declares no window."""
+    if want_from is None or want_to is None:
+        return 0.0
+    avail_from = _as_date(listing.get("availableFrom"))
+    avail_to = _as_date(listing.get("availableTo"))
+    if avail_from is None and avail_to is None:
+        return 0.0
+    if avail_from is not None and want_from < avail_from:
+        return DATE_MISS_PENALTY
+    if avail_to is not None and want_to > avail_to:
+        return DATE_MISS_PENALTY
+    return DATE_FIT_BONUS
+
+
+def _zip_score(listing: dict, target_zip: Optional[str]) -> float:
+    if not target_zip:
+        return 0.0
+    listing_zip = str(listing.get("zipCode") or "")
+    if listing_zip == target_zip:
+        return EXACT_ZIP_BONUS
+    if len(target_zip) >= 3 and listing_zip[:3] == target_zip[:3]:
+        return ZIP3_PREFIX_BONUS
+    return 0.0
 
 
 def score_listing(
-    listing: dict, target_bucket: str, target_zip: str | None, keywords: List[str]
+    listing: dict,
+    query_vector: Optional[Sequence[float]],
+    target_zip: Optional[str] = None,
+    want_from: Optional[date] = None,
+    want_to: Optional[date] = None,
 ) -> float:
+    """Combined ranking score for one listing. Higher is better.
+
+    `query_vector` None => the semantic term is dropped and the score is
+    built from the structured signals only.
+    """
     score = 0.0
-    size = listing.get("size")
-    if size == target_bucket:
-        score += 2.0
-    elif (size, target_bucket) in {("S", "M"), ("M", "S"), ("M", "L"), ("L", "M")}:
-        score += 1.0
 
-    if target_zip and listing.get("zipCode") == target_zip:
-        score += 2.0
+    listing_vec = listing.get("embedding")
+    if query_vector is not None and listing_vec:
+        score += SEMANTIC_WEIGHT * _cosine(query_vector, listing_vec)
 
-    desc = (listing.get("description") or "").lower() + " " + (listing.get("title") or "").lower()
-    for kw in keywords:
-        if kw in desc:
-            score += 0.5
-
-    price = listing.get("pricePerMonth") or 0
-    if price > 0:
-        score += 50 / price
-
+    score += _zip_score(listing, target_zip)
+    score += _price_score(listing)
+    score += _date_fit_score(listing, want_from, want_to)
     return score
 
 
+def _explanation(
+    query_vector: Optional[Sequence[float]],
+    target_zip: Optional[str],
+    n: int,
+) -> str:
+    if n == 0:
+        return "No available spaces matched your description."
+    if query_vector is None:
+        base = (
+            f"Showing {n} available space{'s' if n != 1 else ''}, ranked by "
+            "price and location. (Semantic matching is unavailable right now, "
+            "so this isn't ranked by how well each description matches what "
+            "you typed.)"
+        )
+    else:
+        base = (
+            f"These {n} space{'s' if n != 1 else ''} have the listing "
+            "descriptions closest in meaning to what you described"
+        )
+        base += f", with spaces in {target_zip} moved up" if target_zip else ""
+        base += "."
+    return base
+
+
 def match_listings(
-    listings: List[dict], query: str, zip_code: str | None = None
-) -> tuple[List[dict], str]:
-    sqft = _estimate_sqft_from_query(query)
-    bucket = _bucket_from_sqft(sqft)
-    keywords = [k for k in KEYWORD_SIZE_HINTS.keys() if k in query.lower()]
+    listings: list[dict],
+    query_vector: Optional[Sequence[float]],
+    target_zip: Optional[str] = None,
+    want_from: Optional[date] = None,
+    want_to: Optional[date] = None,
+    top_n: int = TOP_N_DEFAULT,
+) -> tuple[list[dict], str]:
+    """Rank `listings` and return the top `top_n` plus a human explanation.
 
-    scored = []
-    for lst in listings:
-        s = score_listing(lst, bucket, zip_code, keywords)
-        scored.append((s, lst))
+    Listings explicitly marked unavailable (`availability is False`) are
+    dropped. Ordering is by `score_listing` descending; `_id` breaks ties
+    for a stable result.
+    """
+    candidates = [lst for lst in listings if lst.get("availability", True) is not False]
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = [lst for _, lst in scored[:5]]
-
-    explanation = (
-        f"Recommended {bucket}-size spaces"
-        f"{' near ' + zip_code if zip_code else ''}"
-        f" that fit your needs for {', '.join(keywords) if keywords else 'your described items'}."
+    ranked = sorted(
+        candidates,
+        key=lambda lst: (
+            -score_listing(lst, query_vector, target_zip, want_from, want_to),
+            str(lst.get("_id", "")),
+        ),
     )
-    return top, explanation
+    top = ranked[:top_n]
+    return top, _explanation(query_vector, target_zip, len(top))

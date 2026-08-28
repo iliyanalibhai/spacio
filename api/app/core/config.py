@@ -53,6 +53,14 @@ class Settings(BaseSettings):
 
     frontend_url: str = Field(default="http://localhost:5173")
 
+    # Semantic listing matching (app/ml/embeddings.py). When False, the
+    # sentence-transformers model is never loaded and /matching/recommend
+    # falls back to a non-semantic ranking (ZIP + price only). The test
+    # suite sets EMBEDDINGS_ENABLED=false so the ~90 MB model download and
+    # ~1 s load don't happen for tests that have nothing to do with
+    # matching; real deployments leave it True. See docs/DOCUMENTATION.md §3.
+    embeddings_enabled: bool = Field(default=True)
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @field_validator("cors_origins")

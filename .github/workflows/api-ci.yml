@@ -40,10 +40,20 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-          cache-dependency-path: api/requirements-dev.txt
+          cache-dependency-path: |
+            api/requirements.txt
+            api/requirements-dev.txt
 
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
+
+      # Cache the sentence-transformers model (~90 MB) across runs so
+      # tests/test_matching.py's real-model cases don't re-download it.
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-all-MiniLM-L6-v2
 
       - name: Ruff
         run: ruff check .

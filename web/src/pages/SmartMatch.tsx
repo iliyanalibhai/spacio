@@ -3,10 +3,11 @@ import { useMutation } from "@tanstack/react-query";
 import * as matchingApi from "../api/matching";
 import { getListingImage } from "../lib/getListingImage";
 
-// Named "Smart Match" rather than the v1 prototype's "AI Match" — the
-// backend (services/matching.py) is a keyword-lookup heuristic, not
-// semantic search or an LLM. Phase 3 replaces it with real embeddings;
-// until then the copy here shouldn't claim more than the backend does.
+// Named "Smart Match" rather than the v1 prototype's "AI Match". As of
+// Phase 2 the backend (services/matching.py) does real semantic search —
+// all-MiniLM-L6-v2 sentence embeddings over each listing's text, ranked by
+// cosine similarity to the query and nudged by ZIP/price/availability. It's
+// still not an LLM, so the copy stays "Smart Match", not "AI".
 export function SmartMatch() {
   const [query, setQuery] = useState("");
   const [zip, setZip] = useState("");
