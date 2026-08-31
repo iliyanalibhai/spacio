@@ -30,3 +30,7 @@ async def ensure_indexes() -> None:
         [("listingId", 1), ("status", 1), ("startDate", 1), ("endDate", 1)]
     )
     await db.messages.create_index("reservationId")
+    # Payments webhooks and the hold-expiry sweep look reservations/users up
+    # by their Stripe ids; sparse because only rows that have reached a
+    # Stripe flow carry them.
+    await db.users.create_index("stripeConnectAccountId", sparse=True)

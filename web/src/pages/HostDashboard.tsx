@@ -1,16 +1,36 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as listingApi from "../api/listings";
+import { useAuth } from "../hooks/useAuth";
 import { ReservationList } from "../components/ReservationList";
 import { VerificationCard } from "../components/VerificationCard";
+import { PayoutOnboardingCard } from "../components/PayoutOnboardingCard";
 import { CreateListingForm } from "../components/CreateListingForm";
 
 export function HostDashboard() {
+  const { refreshUser } = useAuth();
+  const [onboardingReturn, setOnboardingReturn] = useState(false);
   const { data: myListings = [], isLoading: loadingMy } = useQuery({
     queryKey: ["my-listings"],
     queryFn: listingApi.fetchMyListings,
   });
   const queryClient = useQueryClient();
+
+  // Return leg of the Stripe Connect onboarding redirect (return_url /
+  // refresh_url set in POST /payments/connect/onboard). Mirrors Profile's
+  // `?verified=` handling. Whether onboarding actually completed is decided
+  // by the account.updated webhook, so we just refresh and let
+  // PayoutOnboardingCard's poll show the real state.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("onboarding")) {
+      setOnboardingReturn(true);
+      queryClient.invalidateQueries({ queryKey: ["connect-status"] });
+      refreshUser();
+      window.history.replaceState({}, "", "/host");
+    }
+  }, [queryClient, refreshUser]);
+
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Record<string, unknown>>({});
   const [editFile, setEditFile] = useState<File | null>(null);
@@ -39,9 +59,16 @@ export function HostDashboard() {
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
       <h1 className="text-2xl font-semibold text-slate-900">Host workspace</h1>
+      {onboardingReturn && (
+        <div className="mt-4 rounded-lg border border-brand-100 bg-brand-50 px-4 py-3 text-sm text-brand-800">
+          Thanks — Stripe is reviewing your payout details. This card updates automatically once
+          you're approved.
+        </div>
+      )}
       <div className="mt-6 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
         <div className="space-y-4">
           <VerificationCard />
+          <PayoutOnboardingCard />
           <CreateListingForm />
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">

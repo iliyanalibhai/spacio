@@ -20,6 +20,15 @@ os.environ.setdefault("MONGODB_URI", "mongodb://localhost:27017")
 os.environ.setdefault("JWT_SECRET", "test-secret-do-not-use-in-prod")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
 os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_test_do_not_use_in_prod"
+os.environ["STRIPE_PAYMENTS_WEBHOOK_SECRET"] = "whsec_payments_test_do_not_use_in_prod"
+# A non-empty (dummy) secret key so settings.stripe_configured is True and
+# the payment endpoints take their real branch instead of returning 503.
+# No real Stripe HTTP call is ever made in tests — every stripe.*.create /
+# retrieve / capture / transfer is monkeypatched, and stripe.Webhook.
+# construct_event only needs the webhook signing secret above. Tests that
+# want the "Stripe not configured" path monkeypatch settings.stripe_secret_key
+# to "".
+os.environ.setdefault("STRIPE_SECRET_KEY", "sk_test_dummy_not_a_real_key")
 # Keep the sentence-transformers model out of the default test run (no
 # ~90 MB download, no ~1 s load, no torch import). Only test_matching.py's
 # real-model cases opt back in — its `real_embeddings` fixture flips
@@ -112,11 +121,22 @@ async def registered_host(client):
 
 @pytest_asyncio.fixture
 async def verified_host(registered_host):
+    """A host who has cleared both gates the create-listing endpoint checks:
+    Stripe Identity verification and Stripe Connect payout onboarding. Both
+    are set directly in Mongo (same shortcut seed.py uses) so listing/booking
+    tests don't have to drive the real Stripe redirect flows."""
     from app.db import get_db
 
     db = get_db()
     await db.users.update_one(
-        {"email": registered_host["email"]}, {"$set": {"verificationStatus": "verified"}}
+        {"email": registered_host["email"]},
+        {
+            "$set": {
+                "verificationStatus": "verified",
+                "stripeConnectAccountId": "acct_test_verified_host",
+                "stripeConnectOnboarded": True,
+            }
+        },
     )
     return registered_host
 

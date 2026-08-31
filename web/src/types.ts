@@ -61,4 +61,8 @@ export type User = {
   isHost: boolean;
   phone?: string;
   verificationStatus?: string;
+  // Stripe Connect payout onboarding. `stripeConnectOnboarded` gates
+  // listing creation alongside `verificationStatus === "verified"`.
+  stripeConnectAccountId?: string | null;
+  stripeConnectOnboarded?: boolean;
 };

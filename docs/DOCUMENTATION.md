@@ -34,11 +34,15 @@ flowchart LR
 
     subgraph ThirdParty["Third party"]
         Stripe["Stripe Identity<br/>(host verification)"]
+        StripeConnect["Stripe Connect<br/>(host payout accounts)"]
+        StripeCheckout["Stripe Checkout<br/>(renter payments)"]
     end
 
     Web -- "JSON over HTTPS, JWT bearer" --> API
     API -- "Motor (async)" --> Mongo
     API -- "verification sessions + webhooks" --> Stripe
+    API -- "Express account + onboarding link, account.updated webhook" --> StripeConnect
+    API -- "Checkout session (manual capture), checkout.session.* webhook" --> StripeCheckout
     API -- "price suggestion request" --> Pricing
     API -- "free-text Smart Match query" --> Matching
     Matching -- "reads / backfills listing embeddings" --> Mongo
@@ -193,16 +197,49 @@ compliance and liability burden Spacio shouldn't take on directly; Stripe
 already handles document authenticity checks, selfie matching, and PII
 storage.
 **Alternatives considered:** Persona, Onfido — comparable identity
-verification products. Stripe was chosen because Checkout and Connect (for
-future payments/payouts, Phase 4) are also on the roadmap, and consolidating
-on one vendor for identity + payments simplifies both integration and
-reconciliation.
+verification products. Stripe was chosen because Checkout and Connect are
+also on the roadmap (now built — see below), and consolidating on one vendor
+for identity + payments simplifies both integration and reconciliation.
 **Tradeoffs accepted:** Vendor lock-in to Stripe's verification UX and
 pricing. Webhook-based status updates mean verification status can lag by
 seconds; the frontend polls `/verification/status` to compensate (see
 `VerificationCard` in the web app).
 **Revisit if:** Stripe Identity pricing or coverage becomes a blocker in a
 target market.
+
+### Stripe Connect (host payouts)
+
+**What:** Each host gets a Stripe **Express** connected account, created and
+onboarded through a redirect flow that mirrors the Identity one
+(`POST /payments/connect/onboard` returns a Stripe-hosted `AccountLink` URL;
+`GET /payments/connect/status` + the `account.updated` webhook track when the
+account reaches `charges_enabled && payouts_enabled`). Creating a listing is
+gated on `stripeConnectOnboarded` in addition to identity `verified` — a
+listing Spacio can't pay out on is not worth publishing.
+**Why Express (not Standard or Custom):** Standard requires an OAuth
+connection flow and gives the host a full Stripe dashboard login Spacio
+doesn't want to expose; Custom makes Spacio responsible for building and
+maintaining every screen of the onboarding + compliance UI and for handling
+disputes/KYC directly. Express is the middle option: Stripe hosts onboarding,
+KYC, tax forms, and a limited payout dashboard, while Spacio controls the
+money movement and keeps its `application`-side fee.
+**Accounts API version:** built on Connect **Accounts v1**
+(`stripe.Account.create(type="express")`), which requires the "Accounts v1
+support" feature toggle to be enabled on the platform account. Stripe now
+steers *new* integrations toward Accounts v2 (`POST /v2/core/accounts`), but
+v2 needs a much newer SDK than the pinned `stripe==10.11.0` and a different
+onboarding + webhook surface. v1 is still fully supported (no end-of-life
+date) and keeps this change small and low-risk; a v2 migration is a possible
+future item. See §10.
+**Tradeoffs accepted:** onboarding completion is only known via webhook /
+poll, so there's a short window where a returning host shows "in review";
+`PayoutOnboardingCard` polls to compensate. A host whose account is later
+restricted by Stripe keeps their listings visible until the next approval
+attempt fails (§11).
+
+### Stripe Checkout + manual-capture payments
+
+*(Built in PR-B — this section is filled in when Checkout ships.)*
 
 ### Pricing model (real model as of Phase 2)
 

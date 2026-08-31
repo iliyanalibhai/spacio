@@ -7,22 +7,13 @@ identity.verification_session.verified event and mark an arbitrary user
 correctly signed event still updates the user as expected.
 """
 
-import hmac
 import json
-import time
-from hashlib import sha256
 
 from app.core.config import settings
 from app.db import get_db
+from tests.helpers import sign_stripe_payload as _sign
 
 WEBHOOK_PATH = "/verification/webhook"
-
-
-def _sign(payload: bytes, secret: str, timestamp: int | None = None) -> str:
-    timestamp = timestamp if timestamp is not None else int(time.time())
-    signed_payload = f"{timestamp}.".encode() + payload
-    signature = hmac.new(secret.encode(), signed_payload, sha256).hexdigest()
-    return f"t={timestamp},v1={signature}"
 
 
 def _event(user_id: str, event_type: str) -> bytes:

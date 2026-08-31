@@ -49,7 +49,13 @@ class Settings(BaseSettings):
 
     stripe_secret_key: str = Field(default="")
     stripe_publishable_key: str = Field(default="")
+    # Signing secret for the Stripe Identity webhook (POST /verification/webhook).
     stripe_webhook_secret: str = Field(default="")
+    # Signing secret for the payments + Connect webhook (POST /payments/webhook).
+    # Stripe issues a distinct secret per registered endpoint, so this is
+    # separate from stripe_webhook_secret even though both verify with the
+    # same stripe.Webhook.construct_event. See docs/DOCUMENTATION.md §7.
+    stripe_payments_webhook_secret: str = Field(default="")
 
     frontend_url: str = Field(default="http://localhost:5173")
 
@@ -73,6 +79,14 @@ class Settings(BaseSettings):
                 "'http://localhost:5173' or a comma-separated list."
             )
         return value
+
+    @property
+    def stripe_configured(self) -> bool:
+        """True when a Stripe secret key is set. When False the app still
+        boots and browsing / search / booking-request creation all work —
+        only the payment + Connect-onboarding endpoints return 503, and the
+        hold-expiry sweep does not start. See docs/DOCUMENTATION.md §3."""
+        return bool(self.stripe_secret_key)
 
     @property
     def cors_origins_list(self) -> List[str]:

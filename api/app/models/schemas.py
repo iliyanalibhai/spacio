@@ -36,6 +36,12 @@ class UserPublic(BaseModel):
     phone: Optional[str] = None
     createdAt: datetime
     verificationStatus: Optional[str] = None
+    # Stripe Connect (host payouts). `stripeConnectOnboarded` is set True
+    # only by the account.updated webhook / the /payments/connect/status
+    # refresh, when the connected account has charges_enabled AND
+    # payouts_enabled. Absent on non-host users. See docs/DOCUMENTATION.md §3.
+    stripeConnectAccountId: Optional[str] = None
+    stripeConnectOnboarded: bool = False
 
     model_config = ConfigDict(populate_by_name=True)
 

@@ -11,7 +11,16 @@ from app.core.config import settings
 from app.core.paths import IMAGES_DIR, UPLOAD_DIR
 from app.core.rate_limit import limiter
 from app.db import ensure_indexes
-from app.routers import auth, listings, reservations, messages, pricing, matching, verification
+from app.routers import (
+    auth,
+    listings,
+    reservations,
+    messages,
+    payments,
+    pricing,
+    matching,
+    verification,
+)
 
 
 @asynccontextmanager
@@ -54,6 +63,7 @@ app.include_router(reservations.router, prefix="/reservations", tags=["reservati
 app.include_router(messages.router, prefix="/messages", tags=["messages"])
 app.include_router(pricing.router, prefix="/pricing", tags=["pricing"])
 app.include_router(matching.router, prefix="/matching", tags=["matching"])
+app.include_router(payments.router, prefix="/payments", tags=["payments"])
 app.include_router(verification.router, prefix="/verification", tags=["verification"])
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)

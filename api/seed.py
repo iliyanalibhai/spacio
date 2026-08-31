@@ -55,6 +55,12 @@ async def seed() -> None:
         # self-attestation bug this used to demonstrate. See
         # docs/DOCUMENTATION.md §7.
         "verificationStatus": "verified",
+        # Likewise: the demo host is marked payout-ready without going
+        # through real Stripe Connect onboarding, so seeded listings satisfy
+        # the create-listing gate. A real host completes the redirect flow
+        # in POST /payments/connect/onboard.
+        "stripeConnectAccountId": "acct_seed_demo",
+        "stripeConnectOnboarded": True,
     }
 
     renter_id = str(uuid4())

@@ -45,6 +45,12 @@ async def create_listing(
             status_code=403, detail="You must verify your identity before creating listings"
         )
 
+    if not current_user.get("stripeConnectOnboarded"):
+        raise HTTPException(
+            status_code=403,
+            detail="Set up your payout account before creating listings",
+        )
+
     listing_id = str(uuid4())
     now = datetime.utcnow()
 
