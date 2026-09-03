@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Listing } from "../types";
 import { useAuth } from "../hooks/useAuth";
 import * as reservationApi from "../api/reservations";
+import * as paymentsApi from "../api/payments";
 import { getListingImage } from "../lib/getListingImage";
 import { quoteReservation, BOX_PRICE_PER_MONTH } from "../lib/reservationPricing";
 import { formatDateOnly } from "../lib/formatDate";
@@ -24,23 +25,29 @@ export function ListingDetailModal({
   const [wantsInsurance, setWantsInsurance] = useState(false);
   const [declaredValue, setDeclaredValue] = useState(1000);
   const [hasOwnInsurance, setHasOwnInsurance] = useState(false);
-  const [confirmed, setConfirmed] = useState(false);
 
   const totalSqft = listing.sizeSqft || 100;
   const availableSqft = listing.availableSqft ?? totalSqft;
   const [sqftRequested, setSqftRequested] = useState(Math.min(50, availableSqft));
 
+  const startCheckout = useMutation({
+    mutationFn: paymentsApi.startReservationCheckout,
+    onSuccess: (data) => {
+      // Hands off to Stripe's hosted Checkout page to authorize the card;
+      // the reservation itself was already created (status
+      // pending_host_confirmation, paymentStatus pending_payment) and is
+      // visible in "My Reservations" even if the renter abandons Checkout.
+      window.location.href = data.url;
+    },
+  });
+
   const { mutateAsync, isPending, error } = useMutation({
     mutationFn: reservationApi.createReservation,
-    onSuccess: () => {
+    onSuccess: (reservation) => {
       queryClient.invalidateQueries({ queryKey: ["reservations"] });
       queryClient.invalidateQueries({ queryKey: ["my-reservations"] });
       queryClient.invalidateQueries({ queryKey: ["listings"] });
-      // Payment is `mocked-success` server-side (real Stripe Checkout is
-      // Phase 4) — show a local confirmation rather than redirecting to any
-      // payment page, mocked or real, so this never implies a charge that
-      // didn't happen.
-      setConfirmed(true);
+      startCheckout.mutate(reservation._id);
     },
   });
 
@@ -85,16 +92,31 @@ export function ListingDetailModal({
     });
   };
 
-  if (confirmed) {
+  if (startCheckout.isPending || startCheckout.isSuccess) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
         <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl text-center">
-          <svg className="mx-auto h-12 w-12 text-emerald-500" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-          </svg>
-          <h3 className="mt-3 text-lg font-semibold text-slate-900">Reservation requested</h3>
+          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-b-2 border-brand-600" />
+          <h3 className="mt-3 text-lg font-semibold text-slate-900">Redirecting to secure payment...</h3>
           <p className="mt-1 text-sm text-slate-600">
-            The host has 24 hours to approve or decline. You'll see the status in your reservations.
+            Your spot is held. Stripe will now authorize your card — you won't be charged until the host
+            approves.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (startCheckout.isError) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+        <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl text-center">
+          <h3 className="text-lg font-semibold text-slate-900">Reservation requested</h3>
+          <p className="mt-2 text-sm text-red-600">
+            We couldn't start payment authorization:{" "}
+            {(startCheckout.error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+              "unknown error"}
+            . You can retry from "My Reservations".
           </p>
           <button
             onClick={onClose}

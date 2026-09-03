@@ -1,15 +1,20 @@
 import { useEffect, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../hooks/useAuth";
 import * as reservationApi from "../api/reservations";
 import * as verificationApi from "../api/verification";
+import * as paymentsApi from "../api/payments";
 import { ProfileReservationCard } from "../components/ProfileReservationCard";
 
 export function Profile() {
   const { user, refreshUser } = useAuth();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<"profile" | "reservations">("profile");
+  const [checkoutBanner, setCheckoutBanner] = useState<{ kind: "success" | "cancelled"; text: string } | null>(
+    null
+  );
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -20,7 +25,30 @@ export function Profile() {
       refreshUser();
       window.history.replaceState({}, "", "/profile");
     }
-  }, [refreshUser]);
+
+    const checkout = params.get("checkout");
+    const reservationId = params.get("reservation");
+    if (checkout && reservationId) {
+      setActiveTab("reservations");
+      window.history.replaceState({}, "", "/profile");
+      if (checkout === "complete") {
+        // Force-sync from Stripe immediately rather than waiting on the
+        // webhook, which may not have landed yet in local dev.
+        paymentsApi.getCheckoutStatus(reservationId).finally(() => {
+          queryClient.invalidateQueries({ queryKey: ["my-reservations"] });
+        });
+        setCheckoutBanner({
+          kind: "success",
+          text: "Payment authorized — your card won't be charged until the host approves.",
+        });
+      } else if (checkout === "cancelled") {
+        setCheckoutBanner({
+          kind: "cancelled",
+          text: "Payment was not completed. You can retry from the reservation below.",
+        });
+      }
+    }
+  }, [refreshUser, queryClient]);
 
   const { data: reservations = [], isLoading: loadingReservations } = useQuery({
     queryKey: ["my-reservations"],
@@ -178,6 +206,20 @@ export function Profile() {
 
         {activeTab === "reservations" && (
           <div className="space-y-6">
+            {checkoutBanner && (
+              <div
+                className={`rounded-xl border p-4 text-sm flex items-start justify-between gap-3 ${
+                  checkoutBanner.kind === "success"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                    : "border-amber-200 bg-amber-50 text-amber-800"
+                }`}
+              >
+                <span>{checkoutBanner.text}</span>
+                <button onClick={() => setCheckoutBanner(null)} className="font-medium underline flex-shrink-0">
+                  Dismiss
+                </button>
+              </div>
+            )}
             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
               <h2 className="text-lg font-semibold text-slate-900 mb-4">
                 Active Reservations

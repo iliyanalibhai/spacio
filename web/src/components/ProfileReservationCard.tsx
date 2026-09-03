@@ -4,6 +4,7 @@ import type { Message, Reservation } from "../types";
 import { useAuth } from "../hooks/useAuth";
 import * as listingApi from "../api/listings";
 import * as messageApi from "../api/messages";
+import * as paymentsApi from "../api/payments";
 import { getListingImage } from "../lib/getListingImage";
 import { formatDateOnly } from "../lib/formatDate";
 
@@ -13,6 +14,14 @@ const statusConfig = {
   declined: { bg: "bg-red-100", text: "text-red-700", label: "Declined" },
   expired: { bg: "bg-slate-100", text: "text-slate-600", label: "Expired" },
 } as const;
+
+const PAYMENT_STATUS_LABEL: Record<Reservation["paymentStatus"], string> = {
+  pending_payment: "Payment needed",
+  authorized: "Payment authorized",
+  captured: "Payment captured",
+  canceled: "Not charged",
+  payment_expired: "Payment session expired",
+};
 
 export function ProfileReservationCard({ reservation }: { reservation: Reservation }) {
   const { user } = useAuth();
@@ -39,8 +48,18 @@ export function ProfileReservationCard({ reservation }: { reservation: Reservati
     },
   });
 
+  const retryPayment = useMutation({
+    mutationFn: () => paymentsApi.startReservationCheckout(reservation._id),
+    onSuccess: (data) => {
+      window.location.href = data.url;
+    },
+  });
+
   const status = statusConfig[reservation.status];
   const isHostMessage = (msg: Message) => msg.senderId !== reservation.renterId;
+  const needsPayment =
+    reservation.status === "pending_host_confirmation" &&
+    (reservation.paymentStatus === "pending_payment" || reservation.paymentStatus === "payment_expired");
 
   return (
     <>
@@ -80,6 +99,21 @@ export function ProfileReservationCard({ reservation }: { reservation: Reservati
               )}
               <span className="font-bold text-slate-900">${reservation.totalPrice}</span>
             </div>
+            <span className={`text-xs ${needsPayment ? "text-amber-600 font-medium" : "text-slate-500"}`}>
+              {PAYMENT_STATUS_LABEL[reservation.paymentStatus]}
+            </span>
+            {needsPayment && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  retryPayment.mutate();
+                }}
+                disabled={retryPayment.isPending}
+                className="text-sm font-medium text-brand-600 underline disabled:opacity-60"
+              >
+                {retryPayment.isPending ? "Opening Stripe..." : "Complete payment"}
+              </button>
+            )}
             <div className="flex items-center gap-1 text-brand-600">
               <span className="text-sm font-medium">Chat with Host</span>
             </div>

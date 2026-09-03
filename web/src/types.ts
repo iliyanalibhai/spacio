@@ -40,7 +40,10 @@ export type Reservation = {
   boxCost: number;
   insuranceCost: number;
   totalPrice: number;
-  paymentStatus: string;
+  // "pending_payment" until the renter completes Stripe Checkout,
+  // "authorized" once the card hold is placed (manual capture), "captured"
+  // once the host approves, "canceled"/"payment_expired" otherwise.
+  paymentStatus: "pending_payment" | "authorized" | "captured" | "canceled" | "payment_expired";
   holdExpiresAt: string;
   createdAt: string;
 };
