@@ -21,6 +21,7 @@ from app.routers import (
     payments,
     pricing,
     matching,
+    reviews,
     verification,
 )
 from app.services.hold_expiry import run_forever as run_hold_expiry_sweep
@@ -78,6 +79,7 @@ app.include_router(messages.router, prefix="/messages", tags=["messages"])
 app.include_router(pricing.router, prefix="/pricing", tags=["pricing"])
 app.include_router(matching.router, prefix="/matching", tags=["matching"])
 app.include_router(payments.router, prefix="/payments", tags=["payments"])
+app.include_router(reviews.router, prefix="/reviews", tags=["reviews"])
 app.include_router(verification.router, prefix="/verification", tags=["verification"])
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)

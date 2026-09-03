@@ -38,3 +38,10 @@ async def ensure_indexes() -> None:
     # 60s (status=pending, holdExpiresAt<=now) with no listingId filter, so
     # it can't use the (listingId, status, ...) compound index above.
     await db.reservations.create_index([("status", 1), ("holdExpiresAt", 1)])
+    # One review per reservation (not per listing — a renter who books the
+    # same listing again gets an independent chance to review that stay
+    # too). Enforced here, not just in app/routers/reviews.py, so a race
+    # between two concurrent POST /reviews/ for the same reservation can't
+    # slip both through.
+    await db.reviews.create_index("reservationId", unique=True)
+    await db.reviews.create_index("listingId")

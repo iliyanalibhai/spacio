@@ -65,9 +65,10 @@ async def create_listing(
         **payload_dict,
         "size": _size_bucket_for_sqft(payload.sizeSqft),
         # No fabricated default rating (v1 hardcoded 4.7 on every listing
-        # with no review system behind it). Real ratings arrive with the
-        # Phase 4 review system; until then this is genuinely null.
+        # with no review system behind it) — genuinely null/0 until real
+        # reviews exist. app/routers/reviews.py recomputes both on write.
         "rating": None,
+        "reviewCount": 0,
         # Sentence embedding of title + description, used by
         # /matching/recommend for semantic search. None if embeddings are
         # disabled or the model is unavailable — /matching/recommend

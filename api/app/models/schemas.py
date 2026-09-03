@@ -77,6 +77,10 @@ class ListingPublic(ListingBase):
     availableFrom: Optional[datetime] = None
     availableTo: Optional[datetime] = None
     bookingDeadline: Optional[datetime] = None
+    # Unlike `rating` (genuinely null until the first review — see below),
+    # reviewCount is a real count from the moment a listing exists, so it
+    # defaults to 0 rather than None.
+    reviewCount: int = 0
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -138,6 +142,24 @@ class MessagePublic(BaseModel):
     reservationId: str
     senderId: str
     content: str
+    createdAt: datetime
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ReviewCreate(BaseModel):
+    reservationId: str
+    rating: int = Field(ge=1, le=5)
+    comment: Optional[str] = Field(default=None, max_length=1000)
+
+
+class ReviewPublic(BaseModel):
+    id: str = Field(alias="_id")
+    listingId: str
+    reservationId: str
+    renterId: str
+    rating: int
+    comment: Optional[str] = None
     createdAt: datetime
 
     model_config = ConfigDict(populate_by_name=True)

@@ -163,9 +163,10 @@ async def seed() -> None:
             "availableFrom": available_from,
             "availableTo": available_to,
             "bookingDeadline": None,
-            # Honest: no review system exists yet (Phase 4), so no
+            # Honest: no reviews exist for these seeded listings yet, so no
             # fabricated rating like v1's hardcoded 4.7.
             "rating": None,
+            "reviewCount": 0,
             "createdAt": now,
             "seedSource": SEED_SOURCE,
             **listing,
