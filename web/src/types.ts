@@ -16,10 +16,12 @@ export type Listing = {
   availableFrom?: string;
   availableTo?: string;
   bookingDeadline?: string | null;
-  // Genuinely null until Phase 4's review system exists — the backend
-  // deliberately removed v1's hardcoded 4.7 default. Do not fall back to a
-  // fake number in the UI.
+  // Genuinely null until the listing has at least one real review — the
+  // backend deliberately removed v1's hardcoded 4.7 default. Do not fall
+  // back to a fake number in the UI.
   rating?: number | null;
+  // Real from the moment a listing exists (0, not null) — see Review below.
+  reviewCount?: number;
   createdAt: string;
   hostVerified?: boolean;
 };
@@ -45,6 +47,16 @@ export type Reservation = {
   // once the host approves, "canceled"/"payment_expired" otherwise.
   paymentStatus: "pending_payment" | "authorized" | "captured" | "canceled" | "payment_expired";
   holdExpiresAt: string;
+  createdAt: string;
+};
+
+export type Review = {
+  _id: string;
+  listingId: string;
+  reservationId: string;
+  renterId: string;
+  rating: number;
+  comment?: string | null;
   createdAt: string;
 };
 

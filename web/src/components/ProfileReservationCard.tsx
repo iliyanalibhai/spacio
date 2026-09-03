@@ -5,8 +5,10 @@ import { useAuth } from "../hooks/useAuth";
 import * as listingApi from "../api/listings";
 import * as messageApi from "../api/messages";
 import * as paymentsApi from "../api/payments";
+import * as reviewApi from "../api/reviews";
 import { getListingImage } from "../lib/getListingImage";
 import { formatDateOnly } from "../lib/formatDate";
+import { StarRating } from "./StarRating";
 
 const statusConfig = {
   pending_host_confirmation: { bg: "bg-amber-100", text: "text-amber-700", label: "Pending Approval" },
@@ -60,6 +62,34 @@ export function ProfileReservationCard({ reservation }: { reservation: Reservati
   const needsPayment =
     reservation.status === "pending_host_confirmation" &&
     (reservation.paymentStatus === "pending_payment" || reservation.paymentStatus === "payment_expired");
+
+  const stayHasEnded = new Date(reservation.endDate) <= new Date();
+  const isReviewable = reservation.status === "confirmed" && stayHasEnded;
+
+  const { data: existingReview, isLoading: loadingReview } = useQuery({
+    queryKey: ["review", reservation._id],
+    queryFn: () => reviewApi.getReservationReview(reservation._id),
+    enabled: isReviewable,
+  });
+
+  const [showReviewForm, setShowReviewForm] = useState(false);
+  const [reviewRating, setReviewRating] = useState(0);
+  const [reviewComment, setReviewComment] = useState("");
+
+  const submitReview = useMutation({
+    mutationFn: () =>
+      reviewApi.createReview({
+        reservationId: reservation._id,
+        rating: reviewRating,
+        comment: reviewComment.trim() || null,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["review", reservation._id] });
+      queryClient.invalidateQueries({ queryKey: ["listing", reservation.listingId] });
+      queryClient.invalidateQueries({ queryKey: ["reviews", "listing", reservation.listingId] });
+      setShowReviewForm(false);
+    },
+  });
 
   return (
     <>
@@ -118,6 +148,54 @@ export function ProfileReservationCard({ reservation }: { reservation: Reservati
               <span className="text-sm font-medium">Chat with Host</span>
             </div>
           </div>
+          {isReviewable && !loadingReview && (
+            <div className="mt-3" onClick={(e) => e.stopPropagation()}>
+              {existingReview ? (
+                <div className="flex items-center gap-2">
+                  <StarRating value={existingReview.rating} size="h-4 w-4" />
+                  <span className="text-xs text-slate-500">
+                    Your review{existingReview.comment ? `: "${existingReview.comment}"` : ""}
+                  </span>
+                </div>
+              ) : showReviewForm ? (
+                <div className="rounded-lg border border-slate-200 p-3 bg-slate-50">
+                  <StarRating value={reviewRating} onChange={setReviewRating} />
+                  <textarea
+                    value={reviewComment}
+                    onChange={(e) => setReviewComment(e.target.value)}
+                    placeholder="How was your stay? (optional)"
+                    rows={2}
+                    className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  />
+                  {submitReview.isError && (
+                    <p className="mt-1 text-xs text-red-600">
+                      {(submitReview.error as { response?: { data?: { detail?: string } } })?.response?.data
+                        ?.detail || "Couldn't submit review"}
+                    </p>
+                  )}
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      onClick={() => submitReview.mutate()}
+                      disabled={reviewRating === 0 || submitReview.isPending}
+                      className="rounded-lg bg-brand-600 px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                    >
+                      {submitReview.isPending ? "Submitting..." : "Submit review"}
+                    </button>
+                    <button onClick={() => setShowReviewForm(false)} className="text-sm text-slate-500 underline">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setShowReviewForm(true)}
+                  className="text-sm font-medium text-brand-600 underline"
+                >
+                  Leave a review
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
 

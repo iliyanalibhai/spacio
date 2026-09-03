@@ -64,10 +64,16 @@ export function Profile() {
     },
   });
 
+  // A confirmed reservation whose stay has already ended is functionally
+  // "past" (and reviewable — see ProfileReservationCard), not still active.
+  const hasEnded = (r: (typeof myReservations)[number]) => new Date(r.endDate) <= new Date();
   const activeReservations = myReservations.filter(
-    (r) => r.status === "confirmed" || r.status === "pending_host_confirmation"
+    (r) =>
+      r.status === "pending_host_confirmation" || (r.status === "confirmed" && !hasEnded(r))
   );
-  const pastReservations = myReservations.filter((r) => r.status === "declined" || r.status === "expired");
+  const pastReservations = myReservations.filter(
+    (r) => r.status === "declined" || r.status === "expired" || (r.status === "confirmed" && hasEnded(r))
+  );
 
   if (!user) {
     return <Navigate to="/login" />;

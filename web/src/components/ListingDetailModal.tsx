@@ -1,12 +1,14 @@
 import { useMemo, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Listing } from "../types";
 import { useAuth } from "../hooks/useAuth";
 import * as reservationApi from "../api/reservations";
 import * as paymentsApi from "../api/payments";
+import * as reviewApi from "../api/reviews";
 import { getListingImage } from "../lib/getListingImage";
 import { quoteReservation, BOX_PRICE_PER_MONTH } from "../lib/reservationPricing";
 import { formatDateOnly } from "../lib/formatDate";
+import { StarRating } from "./StarRating";
 
 export function ListingDetailModal({
   listing,
@@ -67,6 +69,11 @@ export function ListingDetailModal({
   );
 
   const isOwnListing = user && listing.hostId === user._id;
+
+  const { data: reviews = [] } = useQuery({
+    queryKey: ["reviews", "listing", listing._id],
+    queryFn: () => reviewApi.listListingReviews(listing._id),
+  });
 
   const handleReserve = async () => {
     if (!user) {
@@ -331,9 +338,16 @@ export function ListingDetailModal({
           </div>
           <div className="rounded-xl border border-slate-200 p-4">
             <h4 className="font-semibold text-slate-900">Details</h4>
-            <p className="mt-2 text-sm text-slate-600">
-              {listing.rating != null ? `Rating: ${listing.rating} • ` : ""}
-              Availability: {listing.availability ? "Available" : "Unavailable"}
+            <p className="mt-2 text-sm text-slate-600 flex items-center gap-2 flex-wrap">
+              {listing.rating != null ? (
+                <span className="flex items-center gap-1">
+                  <StarRating value={Math.round(listing.rating)} size="h-4 w-4" />
+                  {listing.rating} ({listing.reviewCount} review{listing.reviewCount === 1 ? "" : "s"})
+                </span>
+              ) : (
+                <span>No reviews yet</span>
+              )}
+              <span>• Availability: {listing.availability ? "Available" : "Unavailable"}</span>
             </p>
             <p className="mt-2 text-sm text-slate-600">Price: ${listing.pricePerMonth}/month (full space)</p>
             <p className="mt-2 text-sm text-slate-600">Size: {listing.sizeSqft || 100} sq ft total</p>
@@ -357,6 +371,25 @@ export function ListingDetailModal({
             />
           </div>
         </div>
+
+        {reviews.length > 0 && (
+          <div className="mt-4 rounded-xl border border-slate-200 p-4">
+            <h4 className="font-semibold text-slate-900">Reviews</h4>
+            <div className="mt-3 flex flex-col gap-3 max-h-48 overflow-y-auto">
+              {reviews.map((review) => (
+                <div key={review._id} className="border-b border-slate-100 pb-3 last:border-0 last:pb-0">
+                  <div className="flex items-center justify-between">
+                    <StarRating value={review.rating} size="h-3.5 w-3.5" />
+                    <span className="text-xs text-slate-400">
+                      {new Date(review.createdAt).toLocaleDateString()}
+                    </span>
+                  </div>
+                  {review.comment && <p className="mt-1 text-sm text-slate-600">{review.comment}</p>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="mt-4 rounded-xl bg-slate-50 border border-slate-200 p-4">
           <div className="flex items-start gap-3">
