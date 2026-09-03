@@ -334,6 +334,45 @@ only this manual run does.
 60-second poll interval becomes a real cost at scale — an index on
 `(status, holdExpiresAt)` keeps each poll cheap for now (see §4).
 
+### Review system
+
+**What:** `POST /reviews/` lets a renter rate (1–5) and optionally comment
+on a reservation once it's actually happened — `app/services/
+review_eligibility.py::assert_can_review` requires `status == "confirmed"`
+**and** `endDate` in the past, and a unique index on `reviews.reservationId`
+(app/db.py) makes one-review-per-stay a real DB constraint, not just an
+application check. Reviews are scoped to the *reservation*, not the
+listing: a renter who books the same listing again gets an independent
+chance to review that stay too. `GET /reviews/listing/{id}` is public (no
+auth) so search results and the listing detail view can show reviews to
+anyone; `GET /reviews/reservation/{id}` is scoped to the renter or host on
+that one reservation, and returns `null` (not 404) when nothing's been
+written yet, so the frontend can render "leave a review" vs. "you already
+reviewed this" without a try/catch.
+**Rating aggregation:** every `POST /reviews/` recomputes the listing's
+`rating` and `reviewCount` from a full `$avg`/`$sum` over that listing's
+reviews (`_recompute_listing_rating`), rather than maintaining a running
+average incrementally. Always correct even under concurrent writes, and
+cheap at this project's scale — the same tradeoff already made for "no ANN
+index" and "no pagination" (§11).
+**Why gated on `endDate` in the past, not just `status == confirmed`:** a
+reservation is "confirmed" from the moment the host approves, which can be
+well before the stay itself happens. Allowing a review immediately on
+approval would let a renter rate a stay they haven't experienced yet.
+**Still honest about `rating`:** exactly the same policy `create_listing`
+already had (§5, §11) — `rating` stays genuinely `null` until a listing has
+a real review; `reviewCount` differs in that it's a real number (0, not
+null) from the moment a listing exists, since "zero reviews" isn't a
+fabricated value the way a hardcoded `4.7` would be.
+**Tradeoffs accepted:** reviews can't be edited or deleted once submitted —
+matches the scope of what was asked (create + read), and a low-stakes gap
+at this project's current traffic. No review of the *renter* by the host
+exists (only listing reviews), and no reported-review/moderation flow
+exists either.
+**Revisit if:** reviews need to be disputed or moderated before this
+handles real public traffic, or if the host side of trust (rating renters)
+becomes a real product need.
+
 ### Pricing model (real model as of Phase 2)
 
 **What:** `/pricing/suggest` returns a suggested monthly price for a new
@@ -486,7 +525,8 @@ creating a duplicate account.
 | `availability` | bool | |
 | `availableFrom`, `availableTo` | datetime \| null | |
 | `bookingDeadline` | datetime \| null | |
-| `rating` | float \| null | **Fabricated in v1** (hardcoded 4.7 on every listing); Phase 4 replaces this with a real review system. Until then, new listings do not get a fake default (see §11). |
+| `rating` | float \| null | **Fabricated in v1** (hardcoded 4.7 on every listing). Real now (§3's "Review system"): the average of that listing's reviews, recomputed on every `POST /reviews/`; `null` until the first one. |
+| `reviewCount` | int | Real count of reviews, defaults to `0` (not `null` — unlike `rating`, zero is an honest value from the moment a listing exists). |
 | `embedding` | float[384] \| null | Sentence embedding of `title` + `description` (`all-MiniLM-L6-v2`), used by `/matching/recommend` for semantic search (§3). Written on listing create/update; `null` if embeddings were disabled or the model was unavailable at write time, in which case `/matching/recommend` backfills it lazily on the next search. Never returned in API responses. |
 | `createdAt` | datetime | |
 
@@ -525,6 +565,22 @@ hold-expiry sweep (§3), which has no `listingId` to filter on.
 | `createdAt` | datetime | |
 
 **Indexes:** index on `reservationId` (every read filters by it).
+
+### `reviews`
+
+| Field | Type | Notes |
+|---|---|---|
+| `_id` | string (UUID4) | |
+| `listingId` | string | Denormalized from the reservation at write time, so `GET /reviews/listing/{id}` doesn't need a join |
+| `reservationId` | string | The specific stay this review is for — see §3's "Review system" for why reviews are scoped to a reservation, not a listing |
+| `renterId` | string | |
+| `rating` | int (1–5) | |
+| `comment` | string \| null | Optional, max 1000 chars |
+| `createdAt` | datetime | |
+
+**Indexes:** unique index on `reservationId` (one review per stay, enforced
+at the DB level, not just in `app/routers/reviews.py`); index on
+`listingId` (every public listing-reviews read filters by it).
 
 ## 5. Business rules as implemented
 
@@ -939,6 +995,25 @@ that supersedes it and say why.
   with the payment hold released — necessary because pytest's ASGI test
   client never triggers FastAPI's `lifespan` at all, so no automated test
   here exercises the startup wiring itself.
+- **2026-09-02** — Phase 4: real review system, replacing the "no reviews
+  yet" placeholder. Scoped reviews to a *reservation* rather than a
+  listing — closer to how verified-stay reviews actually work (Airbnb-style
+  "only guests who stayed can review"), and it composes cleanly with
+  eligibility (`status == confirmed` and `endDate` in the past) instead of
+  needing a separate "did this renter ever complete a stay here" query. Ate
+  the cost of also fixing `Profile.tsx`'s active/past reservation split —
+  it previously bucketed every `confirmed` reservation as "active" even
+  long after the stay ended, which would have buried the new "leave a
+  review" prompt under "Active Reservations" indefinitely; small change,
+  directly motivated by (and using the same `endDate`-passed check as) the
+  review-eligibility rule, so it went in alongside it rather than as a
+  separate cleanup PR. Chose recompute-the-full-average-on-write over an
+  incremental running average for `listings.rating`/`reviewCount` — same
+  "correct under concurrent writes, cheap at this scale" reasoning as other
+  places in this codebase that chose simplicity over premature optimization
+  (§11). Did not add review edit/delete, host-reviews-renter, or moderation
+  — none were asked for, and the create+read scope shipped is a complete,
+  independently useful slice on its own.
 
 Honest, current as of Phase 0:
 
@@ -952,9 +1027,9 @@ Honest, current as of Phase 0:
   real distributed scheduler — correct for the current single-process
   deployment, but would double-run (harmlessly, since every branch is
   idempotent) with more than one API replica. See §3.
-- **No review system.** Listings no longer get a fabricated `4.7` rating
-  (the v1 default), but there's also no way to earn a real one yet — `rating`
-  is `null` until Phase 4 ships reviews.
+- **Reviews are real but minimal.** Create + read only — no edit, no
+  delete, no moderation/reporting flow, and no way for a host to review a
+  renter (only listing reviews exist). See §3.
 - **Pricing suggestions are a real trained model, but trained entirely on
   synthetic data** — there's still no real booking history. See §6 for the
   full limitations list; must be retrained once real data exists.
