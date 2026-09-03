@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,7 +12,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.core.config import settings
 from app.core.paths import IMAGES_DIR, UPLOAD_DIR
 from app.core.rate_limit import limiter
-from app.db import ensure_indexes
+from app.db import ensure_indexes, get_db
 from app.routers import (
     auth,
     listings,
@@ -21,12 +23,24 @@ from app.routers import (
     matching,
     verification,
 )
+from app.services.hold_expiry import run_forever as run_hold_expiry_sweep
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await ensure_indexes()
+
+    # Without Stripe configured, no host can finish Connect onboarding, so
+    # no listing (and therefore no reservation) can exist yet — see
+    # Settings.stripe_configured and app/services/hold_expiry.py.
+    sweep_task = asyncio.create_task(run_hold_expiry_sweep(get_db())) if settings.stripe_configured else None
+
     yield
+
+    if sweep_task is not None:
+        sweep_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweep_task
 
 
 app = FastAPI(

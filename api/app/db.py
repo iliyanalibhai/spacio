@@ -34,3 +34,7 @@ async def ensure_indexes() -> None:
     # by their Stripe ids; sparse because only rows that have reached a
     # Stripe flow carry them.
     await db.users.create_index("stripeConnectAccountId", sparse=True)
+    # app/services/hold_expiry.py's sweep queries exactly this shape every
+    # 60s (status=pending, holdExpiresAt<=now) with no listingId filter, so
+    # it can't use the (listingId, status, ...) compound index above.
+    await db.reservations.create_index([("status", 1), ("holdExpiresAt", 1)])
