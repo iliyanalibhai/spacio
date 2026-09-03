@@ -9,6 +9,10 @@ from app.deps.auth import get_current_user
 from app.db import get_db
 from app.models.schemas import ReservationCreate, ReservationPublic, ReservationStatus
 from app.services.capacity import CAPACITY_HOLDING_STATUSES, available_sqft_for_range
+from app.services.reservation_payments import (
+    capture_reservation_payment,
+    cancel_reservation_payment,
+)
 from app.services.reservation_pricing import (
     DeclaredValueTooHighError,
     calculate_reservation_cost,
@@ -131,10 +135,14 @@ async def create_reservation(
         "totalPrice": cost.total,
         "holdExpiresAt": now + timedelta(hours=24),
         "createdAt": now,
-        # Real payment integration (Stripe Checkout) is Phase 4. This status
-        # is deliberately never claimed to be a real charge anywhere in the
-        # UI copy.
-        "paymentStatus": "mocked-success",
+        # PR-B: the renter hasn't paid yet — creating a reservation just
+        # holds the space. POST /payments/checkout/{id} starts the Stripe
+        # Checkout authorization; paymentStatus moves to "authorized" once
+        # that completes (webhook or poll), "captured" when the host
+        # approves, "canceled" on decline/expiry/cancellation.
+        "paymentStatus": "pending_payment",
+        "stripeCheckoutSessionId": None,
+        "stripePaymentIntentId": None,
     }
     await db.reservations.insert_one(doc)
     return ReservationPublic.model_validate(doc)
@@ -148,12 +156,17 @@ async def _load_reservation_and_listing(db: AsyncIOMotorDatabase, reservation_id
     return reservation, listing
 
 
-async def _transition_reservation(
+async def _validate_transition(
     db: AsyncIOMotorDatabase,
     reservation_id: str,
     current_user: dict,
     target_status: ReservationStatus,
 ) -> dict:
+    """Load the reservation, check the caller owns the listing, and check
+    the state machine allows this transition — but don't persist anything
+    yet. Split out from the old `_transition_reservation` so `approve`
+    can run its payment capture *between* validation and persisting the
+    status change (see `approve_reservation`)."""
     reservation, listing = await _load_reservation_and_listing(db, reservation_id)
     if not listing or listing.get("hostId") != current_user["_id"]:
         raise HTTPException(status_code=403, detail="Not authorized for this listing")
@@ -164,10 +177,6 @@ async def _transition_reservation(
     except InvalidTransitionError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    await db.reservations.update_one(
-        {"_id": reservation_id}, {"$set": {"status": target_status}}
-    )
-    reservation["status"] = target_status
     return reservation
 
 
@@ -177,9 +186,21 @@ async def approve_reservation(
     db: AsyncIOMotorDatabase = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    reservation = await _transition_reservation(
+    reservation = await _validate_transition(
         db, reservation_id, current_user, ReservationStatus.confirmed
     )
+    if reservation.get("paymentStatus") != "authorized":
+        raise HTTPException(status_code=400, detail="Renter has not completed payment yet")
+
+    # Capture first: if Stripe rejects it, the reservation stays pending
+    # rather than showing "confirmed" without the renter actually being
+    # charged.
+    await capture_reservation_payment(db, reservation)
+    await db.reservations.update_one(
+        {"_id": reservation_id}, {"$set": {"status": ReservationStatus.confirmed}}
+    )
+    reservation["status"] = ReservationStatus.confirmed
+    reservation["paymentStatus"] = "captured"
     return ReservationPublic.model_validate(reservation)
 
 
@@ -189,9 +210,15 @@ async def decline_reservation(
     db: AsyncIOMotorDatabase = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    reservation = await _transition_reservation(
+    reservation = await _validate_transition(
         db, reservation_id, current_user, ReservationStatus.declined
     )
+    await db.reservations.update_one(
+        {"_id": reservation_id}, {"$set": {"status": ReservationStatus.declined}}
+    )
+    reservation["status"] = ReservationStatus.declined
+    await cancel_reservation_payment(db, reservation)
+    reservation["paymentStatus"] = "canceled"
     return ReservationPublic.model_validate(reservation)
 
 
@@ -227,6 +254,14 @@ async def delete_reservation(
 
     if not (is_host_owner or is_renter):
         raise HTTPException(status_code=403, detail="Not authorized for this reservation")
+
+    # Release any live authorization hold before deleting. Deliberately
+    # skipped once paymentStatus is "captured" — the renter has actually
+    # been charged by then, and PaymentIntent.cancel can't undo a capture
+    # (that needs a real refund flow, out of scope here); mislabeling a
+    # captured payment "canceled" would be worse than leaving it alone.
+    if reservation.get("paymentStatus") in ("pending_payment", "authorized", "payment_expired"):
+        await cancel_reservation_payment(db, reservation)
 
     await db.reservations.delete_one({"_id": reservation_id})
     return None

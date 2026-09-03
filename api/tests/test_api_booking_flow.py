@@ -1,8 +1,28 @@
 """End-to-end booking lifecycle through the real HTTP API: search, book,
 approve, message — plus the capacity rule and state machine enforced at
-the API layer, not just in the pure service-level unit tests."""
+the API layer, not just in the pure service-level unit tests.
+
+Approving a reservation now requires an authorized payment (PR-B) — the
+Checkout mechanics themselves are covered in test_payments_checkout.py, and
+the capture/cancel/gating behavior in test_reservation_payment_flow.py.
+Here, `_authorize` shortcuts straight to "authorized" via the DB (same
+shortcut style as the `verified_host` fixture) since this file's own focus
+is the booking lifecycle, not payment authorization."""
+
+from unittest.mock import MagicMock
 
 import pytest
+import stripe
+
+from app.db import get_db
+
+
+async def _authorize(reservation_id: str) -> None:
+    db = get_db()
+    await db.reservations.update_one(
+        {"_id": reservation_id},
+        {"$set": {"paymentStatus": "authorized", "stripePaymentIntentId": "pi_test_fake"}},
+    )
 
 
 @pytest.fixture
@@ -26,9 +46,10 @@ async def listing(client, verified_host):
     return response.json()
 
 
-async def test_full_booking_lifecycle(client, verified_host, registered_renter, listing):
+async def test_full_booking_lifecycle(client, verified_host, registered_renter, listing, monkeypatch):
     renter_headers = {"Authorization": f"Bearer {registered_renter['token']}"}
     host_headers = {"Authorization": f"Bearer {verified_host['token']}"}
+    monkeypatch.setattr(stripe.PaymentIntent, "capture", MagicMock())
 
     booking = await client.post(
         "/reservations/",
@@ -45,15 +66,23 @@ async def test_full_booking_lifecycle(client, verified_host, registered_renter, 
     assert booking.status_code == 201
     body = booking.json()
     assert body["status"] == "pending_host_confirmation"
+    assert body["paymentStatus"] == "pending_payment"
     assert body["basePrice"] == 30.0  # 60 * 0.5 * (30/30)
     assert body["boxCost"] == 10.0
     assert body["insuranceCost"] == 20.0
 
     reservation_id = body["_id"]
 
+    # Payment authorization (Checkout) is exercised end-to-end elsewhere —
+    # shortcut straight to "authorized" here, same as `verified_host` does
+    # for the Identity/Connect flows this test isn't about.
+    await _authorize(reservation_id)
+
     approve = await client.post(f"/reservations/{reservation_id}/approve", headers=host_headers)
     assert approve.status_code == 200
-    assert approve.json()["status"] == "confirmed"
+    approved = approve.json()
+    assert approved["status"] == "confirmed"
+    assert approved["paymentStatus"] == "captured"
 
     # Double approve rejected by the state machine.
     second_approve = await client.post(f"/reservations/{reservation_id}/approve", headers=host_headers)

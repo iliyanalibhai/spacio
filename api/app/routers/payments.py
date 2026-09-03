@@ -2,13 +2,22 @@
 
 Structured exactly like `app/routers/verification.py` (the Stripe Identity
 integration): `stripe.api_key` set at import, a redirect-based hosted flow
-(`/connect/onboard` returns a URL the frontend navigates to, like the
-Identity session), a `/connect/status` poll endpoint, and a single
+(`/connect/onboard`, `/checkout/{id}` each return a URL the frontend
+navigates to, like the Identity session), poll endpoints, and a single
 signature-verified webhook.
 
-PR-A scope: Connect onboarding only. `POST /payments/webhook` handles
-`account.updated` here; `checkout.session.*` events are accepted and
-ignored until PR-B wires Checkout.
+PR-A scope was Connect onboarding only. PR-B (this file, now) adds Checkout:
+`POST /payments/checkout/{reservation_id}` creates a Checkout Session whose
+PaymentIntent uses `capture_method="manual"` — the renter's card is
+authorized (funds held) at booking time but not actually charged until the
+host approves (`reservations.approve_reservation` calls
+`services.reservation_payments.capture_reservation_payment`). A decline,
+hold-expiry, or renter cancellation instead cancels the authorization
+(`cancel_reservation_payment`), releasing the hold with no charge. The
+Checkout Session's `transfer_data.destination` sends the money straight to
+the host's Connect account, with `application_fee_amount` set to the
+reservation's own `serviceFee` — Spacio's cut — so the split is exactly the
+number already shown to the renter in the booking quote.
 """
 
 import logging
@@ -22,6 +31,7 @@ from app.core.config import settings
 from app.core.rate_limit import limiter
 from app.db import get_db
 from app.deps.auth import get_current_user
+from app.models.schemas import ReservationStatus
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -33,10 +43,36 @@ stripe.api_key = settings.stripe_secret_key
 # under review / restricted, so it is not sufficient.
 _READY_FLAGS = ("charges_enabled", "payouts_enabled")
 
+# Reservation paymentStatus values a Checkout Session may be (re)started
+# from — i.e. no successful authorization exists yet.
+_PAYABLE_STATUSES = {"pending_payment", "payment_expired"}
+
+# stripe.PaymentIntent.status -> our paymentStatus, used by both the poll
+# endpoint and (for capture/cancel) implicitly documented by
+# services/reservation_payments.py.
+_PAYMENT_INTENT_STATUS_MAP = {
+    "requires_payment_method": "pending_payment",
+    "requires_confirmation": "pending_payment",
+    "requires_action": "pending_payment",
+    "processing": "pending_payment",
+    "requires_capture": "authorized",
+    "succeeded": "captured",
+    "canceled": "canceled",
+}
+
 
 class ConnectStatusResponse(BaseModel):
     onboarded: bool
     accountId: str | None = None
+    error: str | None = None
+
+
+class CheckoutSessionResponse(BaseModel):
+    url: str
+
+
+class CheckoutStatusResponse(BaseModel):
+    paymentStatus: str
     error: str | None = None
 
 
@@ -121,6 +157,116 @@ async def connect_status(
     return ConnectStatusResponse(onboarded=ready, accountId=account_id)
 
 
+@router.post("/checkout/{reservation_id}", response_model=CheckoutSessionResponse)
+@limiter.limit("10/minute")
+async def create_checkout_session(
+    request: Request,
+    reservation_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Create a Stripe Checkout Session that authorizes (does not yet
+    capture) the renter's card for a reservation's total. Redirect-based
+    hosted flow, same shape as `connect_onboard` /
+    `verification.create_verification_session`: returns a URL for the
+    frontend to navigate to."""
+    if not settings.stripe_configured:
+        raise HTTPException(status_code=503, detail="Payments are not configured in this environment")
+
+    reservation = await db.reservations.find_one({"_id": reservation_id})
+    if not reservation:
+        raise HTTPException(status_code=404, detail="Reservation not found")
+    if reservation.get("renterId") != current_user["_id"]:
+        raise HTTPException(status_code=403, detail="Not authorized for this reservation")
+    if reservation.get("status") != ReservationStatus.pending:
+        raise HTTPException(status_code=400, detail="This reservation is no longer awaiting payment")
+    if reservation.get("paymentStatus") not in _PAYABLE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Reservation payment is already {reservation.get('paymentStatus')}",
+        )
+
+    listing = await db.listings.find_one({"_id": reservation["listingId"]})
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    host = await db.users.find_one({"_id": listing["hostId"]})
+    host_account_id = host.get("stripeConnectAccountId") if host else None
+    if not host_account_id:
+        raise HTTPException(status_code=400, detail="Host has not completed payout onboarding")
+
+    amount_cents = round(reservation["totalPrice"] * 100)
+    fee_cents = round(reservation["serviceFee"] * 100)
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            payment_method_types=["card"],
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": "usd",
+                        "product_data": {"name": f"Spacio reservation: {listing['title']}"},
+                        "unit_amount": amount_cents,
+                    },
+                    "quantity": 1,
+                }
+            ],
+            payment_intent_data={
+                "capture_method": "manual",
+                "application_fee_amount": fee_cents,
+                "transfer_data": {"destination": host_account_id},
+                "metadata": {"reservation_id": reservation_id},
+            },
+            metadata={"reservation_id": reservation_id},
+            success_url=f"{settings.frontend_url}/profile?checkout=complete&reservation={reservation_id}",
+            cancel_url=f"{settings.frontend_url}/profile?checkout=cancelled&reservation={reservation_id}",
+        )
+    except stripe.StripeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if not session.url:
+        raise HTTPException(status_code=500, detail="Stripe did not return a checkout URL")
+
+    await db.reservations.update_one(
+        {"_id": reservation_id}, {"$set": {"stripeCheckoutSessionId": session.id}}
+    )
+    return CheckoutSessionResponse(url=session.url)
+
+
+@router.get("/checkout/status/{reservation_id}", response_model=CheckoutStatusResponse)
+async def checkout_status(
+    reservation_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Poll a reservation's payment-authorization state, like
+    `connect_status` / `verification.get_verification_status`: refreshes
+    from Stripe when a PaymentIntent exists, persists any change, and never
+    500s on a Stripe error — it falls back to the stored value. Used right
+    after the renter is redirected back from Checkout, since the webhook may
+    not have arrived yet."""
+    reservation = await db.reservations.find_one({"_id": reservation_id})
+    if not reservation:
+        raise HTTPException(status_code=404, detail="Reservation not found")
+    if reservation.get("renterId") != current_user["_id"]:
+        raise HTTPException(status_code=403, detail="Not authorized for this reservation")
+
+    pi_id = reservation.get("stripePaymentIntentId")
+    stored = reservation.get("paymentStatus", "pending_payment")
+    if not pi_id or not settings.stripe_configured:
+        return CheckoutStatusResponse(paymentStatus=stored)
+
+    try:
+        intent = stripe.PaymentIntent.retrieve(pi_id)
+    except stripe.StripeError as e:
+        return CheckoutStatusResponse(paymentStatus=stored, error=str(e))
+
+    mapped = _PAYMENT_INTENT_STATUS_MAP.get(intent.status, stored)
+    if mapped != stored:
+        await db.reservations.update_one({"_id": reservation_id}, {"$set": {"paymentStatus": mapped}})
+    return CheckoutStatusResponse(paymentStatus=mapped)
+
+
 @router.post("/webhook")
 async def payments_webhook(request: Request, db: AsyncIOMotorDatabase = Depends(get_db)):
     """Signature-verified Stripe webhook for payments + Connect events.
@@ -148,5 +294,26 @@ async def payments_webhook(request: Request, db: AsyncIOMotorDatabase = Depends(
         query = {"_id": user_id} if user_id else {"stripeConnectAccountId": account["id"]}
         await db.users.update_one(query, {"$set": {"stripeConnectOnboarded": onboarded}})
 
-    # checkout.session.completed / checkout.session.expired are wired in PR-B.
+    elif event.type == "checkout.session.completed":
+        session = event.data.object
+        reservation_id = session.get("metadata", {}).get("reservation_id")
+        payment_intent_id = session.get("payment_intent")
+        if reservation_id:
+            await db.reservations.update_one(
+                {"_id": reservation_id},
+                {"$set": {"paymentStatus": "authorized", "stripePaymentIntentId": payment_intent_id}},
+            )
+
+    elif event.type == "checkout.session.expired":
+        session = event.data.object
+        reservation_id = session.get("metadata", {}).get("reservation_id")
+        if reservation_id:
+            # Guarded on the stored status so a late/out-of-order expiry
+            # event can never clobber a reservation that already got
+            # authorized (or beyond) through a later Checkout attempt.
+            await db.reservations.update_one(
+                {"_id": reservation_id, "paymentStatus": "pending_payment"},
+                {"$set": {"paymentStatus": "payment_expired"}},
+            )
+
     return {"received": True}
