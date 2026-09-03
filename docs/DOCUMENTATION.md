@@ -64,7 +64,7 @@ sequenceDiagram
     A->>M: insert reservation (status=pending_host_confirmation, paymentStatus=pending_payment, holdExpiresAt=+24h)
     A-->>R: 201 ReservationPublic
     R->>A: POST /payments/checkout/{id} -> Stripe Checkout (card authorized, not charged)
-    Note over A,M: Host later calls POST /reservations/{id}/approve (captures the card)<br/>or /decline (releases the hold). No action within 24h -> expired (scheduled job, Phase 4).
+    Note over A,M: Host later calls POST /reservations/{id}/approve (captures the card)<br/>or /decline (releases the hold). No action within 24h -> expired, hold released (background sweep, §3).
 ```
 
 ### Request flow: price suggestion (host creating a listing)
@@ -278,19 +278,61 @@ declined / renter cancelled while pending) **or** `payment_expired`
 (Checkout Session expired unused — `checkout.session.expired`; the renter
 can retry from "My Reservations").
 **Tradeoffs accepted:** Stripe's own authorization hold on a card only
-lasts about 7 days; since the 24-hour hold-expiry sweep still isn't wired to
-a scheduled job (§11), a reservation the host never acts on can in
-principle sit "authorized" past that window, at which point `approve` would
-call `PaymentIntent.capture` on an authorization the issuing bank has
-already released and get a Stripe error (surfaced as the existing 502, not
-a silent failure) — real, but a narrower and more honestly-surfaced version
-of a limitation that already existed before this PR. Checkout's amount and
+lasts about 7 days. The hold-expiry sweep (`app/services/hold_expiry.py`,
+below) releases any outstanding `authorized` PaymentIntent well before
+that, so this only matters if the sweep itself has been down for multiple
+days — at that point `approve` would call `PaymentIntent.capture` on an
+authorization the issuing bank already released and get a Stripe error
+(surfaced as the existing 502, not a silent failure). Checkout's amount and
 the Connect destination are always read from the server-stored reservation
 and listing documents, never from client input, so there's no path for a
 renter to alter what they're charged or where it's sent.
-**Revisit if:** the 24-hour hold-expiry sweep ships (Phase 4) — it should
-also cancel any still-`authorized` PaymentIntent, not just flip
-`status` to `expired`.
+**Revisit if:** running more than one API replica — the sweep is a single
+in-process `asyncio` loop (§3's hold-expiry section, below), so a second
+replica would double-run it. Every branch is idempotent ($set + a
+best-effort `PaymentIntent.cancel`), so double-running is harmless, just
+wasteful; worth moving to a leader-election or single-worker-only scheme
+before that matters.
+
+### Reservation hold-expiry sweep
+
+**What:** A background `asyncio` task, started from `main.py`'s `lifespan`
+alongside the app itself, that calls
+`app/services/hold_expiry.py::expire_stale_holds` every 60 seconds. It finds
+every reservation still `pending_host_confirmation` whose `holdExpiresAt`
+has passed, flips it to `expired`, and releases any outstanding payment
+authorization via the same `cancel_reservation_payment` decline/cancel
+already uses — so an expired hold and a host decline end up in exactly the
+same state. Only started when `Settings.stripe_configured` is true: without
+Stripe, no host can finish Connect onboarding, so no listing (and no
+reservation) can exist yet.
+**Why a plain `asyncio` loop, not APScheduler/Celery/cron:** this is a
+single-process deployment (no separate worker dyno, no message queue) doing
+one simple periodic query — the same "correct at this scale, revisit before
+multiple replicas" reasoning already used for the in-memory rate limiter.
+Adding a scheduler dependency for a 15-line loop would be the kind of
+premature infrastructure this project has otherwise avoided.
+**Why the sweep function is separate from the loop:** `expire_stale_holds`
+takes no time-related arguments except an optional `now` and does no
+sleeping, so it's called directly (not through the loop) in
+`api/tests/test_hold_expiry_sweep.py` against a real test database — no
+need to fast-forward a clock or wait out a real 60-second interval in CI.
+The scheduling wrapper (`run_forever`) is untested by design: it's a
+one-line `while True: ... ; await asyncio.sleep(...)`, thin enough that a
+test would just be re-asserting Python's own semantics.
+**Verified live, not just in tests:** started the real app, created a
+reservation through the actual API, backdated its `holdExpiresAt` directly
+in Mongo, and polled `GET /reservations/` until the running background
+task — inside the real `lifespan`, not simulated — flipped it to `expired`
+with `paymentStatus: "canceled"`. This matters because the pytest test
+client's `ASGITransport` never triggers FastAPI's `lifespan` at all (see
+`conftest.py`'s `clean_database` fixture, which has to call
+`ensure_indexes()` itself for that exact reason) — so no automated test in
+this repo actually exercises the task getting scheduled at app startup;
+only this manual run does.
+**Revisit if:** running more than one API replica (see above), or if the
+60-second poll interval becomes a real cost at scale — an index on
+`(status, holdExpiresAt)` keeps each poll cheap for now (see §4).
 
 ### Pricing model (real model as of Phase 2)
 
@@ -461,7 +503,7 @@ creating a duplicate account.
 | `hasOwnInsurance` | bool | If true, renter supplied proof of their own insurance instead of buying Spacio's |
 | `status` | enum | `pending_host_confirmation` \| `confirmed` \| `declined` \| `expired` |
 | `basePrice`, `serviceFee`, `boxCost`, `insuranceCost`, `totalPrice` | float | See §5 for the formula |
-| `holdExpiresAt` | datetime | 24h from creation; nothing expires it yet — see §11 |
+| `holdExpiresAt` | datetime | 24h from creation; the background sweep (§3) expires it and releases any payment hold |
 | `createdAt` | datetime | |
 | `paymentStatus` | enum | `pending_payment` \| `authorized` \| `captured` \| `canceled` \| `payment_expired` — see §3's Checkout section |
 | `stripeCheckoutSessionId` | string \| null | Set once the renter starts Checkout; never returned in API responses |
@@ -469,7 +511,8 @@ creating a duplicate account.
 
 **Indexes:** compound index on `(listingId, status, startDate, endDate)` —
 every capacity check and search-by-date query filters on exactly these
-fields together.
+fields together. Separate `(status, holdExpiresAt)` index for the
+hold-expiry sweep (§3), which has no `listingId` to filter on.
 
 ### `messages`
 
@@ -568,9 +611,9 @@ approved after it's been declined, for example. The v1 prototype did not
 enforce this (you could call `/approve` on an already-declined reservation);
 `app/services/reservation_state.py` now validates every transition.
 
-The 24-hour auto-expiry is not yet wired to a scheduled job (see §11) — the
-pure `is_hold_expired()` check exists and is tested, but nothing calls it on
-a timer until Phase 4.
+The 24-hour auto-expiry runs as a background sweep (§3's "Reservation
+hold-expiry sweep") that calls this same `is_hold_expired()` check every 60
+seconds.
 
 ## 6. The pricing model
 
@@ -879,6 +922,23 @@ that supersedes it and say why.
   payouts (`routers/payments.py`'s `/connect/*` endpoints, gating listing
   creation on `stripeConnectOnboarded`), which shipped first since Checkout
   needs a destination account to pay out to.
+- **2026-09-02** — Phase 4: wired the 24-hour reservation hold-expiry sweep
+  that had been logic-only-and-tested since Phase 0
+  (`reservation_state.is_hold_expired`). Chose a plain `asyncio` background
+  task started from `main.py`'s `lifespan`, polling every 60 seconds, over
+  pulling in APScheduler/Celery/a cron container — same "right-sized for a
+  single-process deployment" reasoning already applied to the in-memory
+  rate limiter, and a 15-line loop didn't justify a new dependency. The
+  sweep function itself (`expire_stale_holds`) takes an optional `now` and
+  does no sleeping, so it's tested directly against a real database rather
+  than through the scheduling loop. Added a `(status, holdExpiresAt)` index
+  since the sweep's query has no `listingId` to piggyback on the existing
+  compound index. Verified the actual background task starting at real app
+  boot (not just the sweep function in isolation) by running the live app,
+  backdating a reservation's hold, and confirming it flipped to `expired`
+  with the payment hold released — necessary because pytest's ASGI test
+  client never triggers FastAPI's `lifespan` at all, so no automated test
+  here exercises the startup wiring itself.
 
 Honest, current as of Phase 0:
 
@@ -888,11 +948,10 @@ Honest, current as of Phase 0:
   "captured"`) — `DELETE /reservations/{id}` deliberately leaves a captured
   payment untouched rather than mislabeling it, but doesn't issue a Stripe
   refund either. See §3.
-- **No scheduled job expires 24-hour holds.** The logic to detect an expired
-  hold exists and is tested; nothing calls it on a timer yet (Phase 4). Now
-  that Checkout is live, this also means a reservation the host never acts
-  on can leave a renter's card authorized past Stripe's own ~7-day
-  authorization window — see §3's Checkout tradeoffs.
+- **The hold-expiry sweep is a single in-process `asyncio` loop**, not a
+  real distributed scheduler — correct for the current single-process
+  deployment, but would double-run (harmlessly, since every branch is
+  idempotent) with more than one API replica. See §3.
 - **No review system.** Listings no longer get a fabricated `4.7` rating
   (the v1 default), but there's also no way to earn a real one yet — `rating`
   is `null` until Phase 4 ships reviews.
