@@ -61,9 +61,10 @@ sequenceDiagram
     A->>M: find overlapping reservations (status in [pending, confirmed])
     A->>A: sum reserved sqft; check sqftRequested <= totalSqft - reserved
     A->>A: calculate cost (base + service fee + box + insurance)
-    A->>M: insert reservation (status=pending_host_confirmation, holdExpiresAt=+24h)
+    A->>M: insert reservation (status=pending_host_confirmation, paymentStatus=pending_payment, holdExpiresAt=+24h)
     A-->>R: 201 ReservationPublic
-    Note over A,M: Host later calls POST /reservations/{id}/approve or /decline.<br/>No action within 24h -> expired (scheduled job, Phase 4).
+    R->>A: POST /payments/checkout/{id} -> Stripe Checkout (card authorized, not charged)
+    Note over A,M: Host later calls POST /reservations/{id}/approve (captures the card)<br/>or /decline (releases the hold). No action within 24h -> expired (scheduled job, Phase 4).
 ```
 
 ### Request flow: price suggestion (host creating a listing)
@@ -239,7 +240,57 @@ attempt fails (§11).
 
 ### Stripe Checkout + manual-capture payments
 
-*(Built in PR-B — this section is filled in when Checkout ships.)*
+**What:** `POST /payments/checkout/{reservation_id}` creates a Stripe
+Checkout Session for the reservation's `totalPrice` and returns a
+Stripe-hosted URL, same redirect shape as Identity/Connect. The Session's
+PaymentIntent is created with `capture_method="manual"` — the renter's card
+is *authorized* (funds held) when Checkout completes, not charged yet. The
+host's approval is the actual charge:
+`reservations.approve_reservation` calls
+`services/reservation_payments.py::capture_reservation_payment`, which
+raises rather than confirming the reservation if the capture fails, so a
+"confirmed" reservation always means the renter was actually charged. A
+decline, an abandoned/expired Checkout, or the renter cancelling their own
+still-pending reservation instead calls `cancel_reservation_payment`, which
+releases the hold via `PaymentIntent.cancel` (best-effort — a Stripe error
+there must never block the decline itself). `GET
+/payments/checkout/status/{reservation_id}` polls the live PaymentIntent
+status, same pattern as `connect_status`/`get_verification_status`: never
+500s on a Stripe error, falls back to the stored value.
+**Money split:** the Session's `payment_intent_data` sets
+`transfer_data.destination` to the host's Connect account and
+`application_fee_amount` to the reservation's own `serviceFee` (already
+20% of the base price — the same number already shown to the renter in the
+booking quote). So Spacio's cut and the host's payout are read directly off
+numbers the renter already saw, not recomputed separately at charge time.
+**Why manual capture, not automatic:** the business flow requires a host
+approval step *before* money moves — an automatically-captured charge would
+mean the renter is billed for a reservation the host might still decline.
+Manual capture lets Checkout authorize the card immediately (so the renter
+commits at booking time, same as v1's Stripe checkout link) while deferring
+the actual charge until the host acts, and cleanly maps decline/expiry to
+"release the hold" instead of "charge then refund."
+**`paymentStatus` values:** `pending_payment` (reservation created, no
+successful Checkout yet) → `authorized` (Checkout completed,
+`checkout.session.completed` webhook or the status-poll endpoint recorded
+the PaymentIntent) → `captured` (host approved) **or** `canceled` (host
+declined / renter cancelled while pending) **or** `payment_expired`
+(Checkout Session expired unused — `checkout.session.expired`; the renter
+can retry from "My Reservations").
+**Tradeoffs accepted:** Stripe's own authorization hold on a card only
+lasts about 7 days; since the 24-hour hold-expiry sweep still isn't wired to
+a scheduled job (§11), a reservation the host never acts on can in
+principle sit "authorized" past that window, at which point `approve` would
+call `PaymentIntent.capture` on an authorization the issuing bank has
+already released and get a Stripe error (surfaced as the existing 502, not
+a silent failure) — real, but a narrower and more honestly-surfaced version
+of a limitation that already existed before this PR. Checkout's amount and
+the Connect destination are always read from the server-stored reservation
+and listing documents, never from client input, so there's no path for a
+renter to alter what they're charged or where it's sent.
+**Revisit if:** the 24-hour hold-expiry sweep ships (Phase 4) — it should
+also cancel any still-`authorized` PaymentIntent, not just flip
+`status` to `expired`.
 
 ### Pricing model (real model as of Phase 2)
 
@@ -412,7 +463,9 @@ creating a duplicate account.
 | `basePrice`, `serviceFee`, `boxCost`, `insuranceCost`, `totalPrice` | float | See §5 for the formula |
 | `holdExpiresAt` | datetime | 24h from creation; nothing expires it yet — see §11 |
 | `createdAt` | datetime | |
-| `paymentStatus` | string | Still `"mocked-success"` — real Stripe Checkout is Phase 4 |
+| `paymentStatus` | enum | `pending_payment` \| `authorized` \| `captured` \| `canceled` \| `payment_expired` — see §3's Checkout section |
+| `stripeCheckoutSessionId` | string \| null | Set once the renter starts Checkout; never returned in API responses |
+| `stripePaymentIntentId` | string \| null | Set by the `checkout.session.completed` webhook (or the status-poll fallback); what `capture`/`cancel` act on |
 
 **Indexes:** compound index on `(listingId, status, startDate, endDate)` —
 every capacity check and search-by-date query filters on exactly these
@@ -809,13 +862,37 @@ that supersedes it and say why.
   read; `EMBEDDINGS_ENABLED=false` disables the model for the test suite
   and degrades `/matching/recommend` to a ZIP+price ranking rather than
   failing.
+- **2026-09-02** — Phase 4, PR-B: Stripe Checkout for renter payments,
+  replacing `paymentStatus: "mocked-success"`. Chose manual-capture
+  (`capture_method="manual"`) over an automatic charge specifically because
+  the business flow requires host approval *before* money moves — see §3
+  for the full reasoning. Split the money at the Checkout layer via Connect
+  destination charges (`transfer_data.destination` = host's account,
+  `application_fee_amount` = the reservation's own `serviceFee`) rather than
+  charging Spacio's platform account and doing a manual transfer afterward,
+  since the split is then computed once (in `reservation_pricing.py`) and
+  reused everywhere instead of recomputed at charge time. Put the
+  capture/cancel Stripe calls in a new `services/reservation_payments.py`
+  rather than importing `routers/payments.py` from `routers/reservations.py`
+  — small module, but keeps routers from importing each other. This
+  followed **Phase 4, PR-A: Stripe Connect Express onboarding** for host
+  payouts (`routers/payments.py`'s `/connect/*` endpoints, gating listing
+  creation on `stripeConnectOnboarded`), which shipped first since Checkout
+  needs a destination account to pay out to.
 
 Honest, current as of Phase 0:
 
-- **No payments yet.** `paymentStatus` is still `"mocked-success"`. Stripe
-  Checkout (renters) and Stripe Connect (host payouts) are Phase 4.
+- **Payments are real (test-mode Stripe), but only for the manual-capture
+  authorize/capture/cancel path.** No refund flow exists yet for a renter
+  who cancels *after* a host has already approved (`paymentStatus:
+  "captured"`) — `DELETE /reservations/{id}` deliberately leaves a captured
+  payment untouched rather than mislabeling it, but doesn't issue a Stripe
+  refund either. See §3.
 - **No scheduled job expires 24-hour holds.** The logic to detect an expired
-  hold exists and is tested; nothing calls it on a timer yet (Phase 4).
+  hold exists and is tested; nothing calls it on a timer yet (Phase 4). Now
+  that Checkout is live, this also means a reservation the host never acts
+  on can leave a renter's card authorized past Stripe's own ~7-day
+  authorization window — see §3's Checkout tradeoffs.
 - **No review system.** Listings no longer get a fabricated `4.7` rating
   (the v1 default), but there's also no way to earn a real one yet — `rating`
   is `null` until Phase 4 ships reviews.
