@@ -26,6 +26,7 @@ flowchart LR
         API["api (FastAPI)"]
         Pricing["pricing model<br/>(app/ml/, LightGBM)"]
         Matching["matching<br/>(app/ml/, MiniLM embeddings)"]
+        Geo["geocoding<br/>(app/services/geo.py,<br/>vendored ZIP centroid table)"]
     end
 
     subgraph Data
@@ -45,7 +46,8 @@ flowchart LR
     API -- "Checkout session (manual capture), checkout.session.* webhook" --> StripeCheckout
     API -- "price suggestion request" --> Pricing
     API -- "free-text Smart Match query" --> Matching
-    Matching -- "reads / backfills listing embeddings" --> Mongo
+    API -- "ZIP -> lat/lng for radius search & rerank" --> Geo
+    Matching -- "reads / backfills listing embeddings + locations" --> Mongo
 ```
 
 ### Request flow: creating a booking
@@ -422,13 +424,15 @@ keyword dictionary (`KEYWORD_SIZE_HINTS`).
   because all vectors are L2-normalized, is just a dot product. This is the
   dominant ranking signal.
 - **Reranking:** the semantic score is then nudged by the structured
-  signals — exact ZIP match (+0.15) or ZIP3-prefix match (+0.07), a small
-  price term (≤0.08, favouring cheaper), and, if the caller passes dates, an
-  availability-window fit bonus / miss penalty. Weights live as named
-  constants at the top of `app/services/matching.py`; they're deliberately
-  small so a far-away exact-text match never outranks a nearby near-match,
-  but they break ties among similarly-relevant listings. Not formally tuned
-  — there's no labelled relevance data to tune against (see limitations).
+  signals — an exponential **distance decay** from the search origin
+  (≤0.15, halving roughly every ~10 miles; see "Geography & distance
+  search" below), a small price term (≤0.08, favouring cheaper), and, if the
+  caller passes dates, an availability-window fit bonus / miss penalty.
+  Weights live as named constants at the top of `app/services/matching.py`;
+  they're deliberately small so a far-away exact-text match never outranks a
+  nearby near-match, but they break ties among similarly-relevant listings.
+  Not formally tuned — there's no labelled relevance data to tune against
+  (see limitations).
 - **Why "bicycle" now finds "great for cyclists":** the keyword version
   matched substrings, so a query and a listing that meant the same thing
   but shared no words scored zero. Embeddings place text near other text
@@ -439,10 +443,12 @@ keyword dictionary (`KEYWORD_SIZE_HINTS`).
 **Design choices:**
 
 - `app/services/matching.py` is pure and model-free: it takes the query
-  vector and listings that already carry an `embedding`, and does nothing
-  but arithmetic. It never imports torch, so it unit-tests instantly with
-  hand-built toy vectors (`tests/test_matching.py::TestRanking`). Producing
-  the vectors is the router's job.
+  vector, an optional `(lat, lng)` origin, and listings that already carry
+  an `embedding` and a `location`, and does nothing but arithmetic (the only
+  import beyond numpy is `haversine_miles` from `app/services/geo.py`). It
+  never imports torch, so it unit-tests instantly with hand-built toy
+  vectors (`tests/test_matching.py::TestRanking`). Producing the vectors and
+  geocoding the origin are the router's job.
 - **Brute-force comparison, no ANN index.** `/matching/recommend` loads all
   listings and scores them in a loop. At Spacio's scale (hundreds of
   listings) this is trivially fast and an approximate-nearest-neighbour
@@ -451,7 +457,7 @@ keyword dictionary (`KEYWORD_SIZE_HINTS`).
   magnitude.
 - **Graceful degradation.** `EMBEDDINGS_ENABLED=false` (or any model
   load/download failure) makes `/matching/recommend` fall back to a
-  non-semantic ranking (ZIP + price only), and its `explanation` string
+  non-semantic ranking (distance + price only), and its `explanation` string
   says so rather than pretending the results are semantically ranked. The
   test suite sets `EMBEDDINGS_ENABLED=false` so the ~90MB download and ~1s
   load don't happen for the ~76 tests that have nothing to do with
@@ -474,8 +480,64 @@ keyword dictionary (`KEYWORD_SIZE_HINTS`).
 - Rerank weights are hand-set, not tuned.
 - Brute-force scan; no ANN index (fine at current scale).
 - The query is embedded on every request (~10–50ms on CPU); not cached.
-- Matching still doesn't understand geography — ZIP is string matching, not
-  distance (§11).
+
+### Geography & distance search
+
+**Built in Phase 4 (2026-09-03).** Search and Smart Match understand real
+distance now, not just ZIP-string equality.
+
+**Geocoding — ZIP centroid.** A listing stores a 5-digit `zipCode` and a
+neighbourhood-level `addressSummary` (never a street address — a deliberate
+host-privacy choice), so the only geocoding possible is ZIP → centroid.
+`app/data/zip_centroids.csv` (vendored from the US Census 2020 ZCTA
+gazetteer, public domain, ~33k rows, committed to the repo) maps each ZIP
+Code Tabulation Area to its interior point; `app/services/geo.py` loads it
+once and exposes `zip_to_coords`, `haversine_miles`, `to_geojson_point`.
+`app/data/build_zip_centroids.py` regenerates the CSV and documents its
+provenance. Accuracy is therefore ZIP-centroid level (~1–3 miles in a
+typical suburban ZIP) — honest about what the data is, and enough for
+"storage within N miles"; it is not rooftop geocoding (§11).
+
+**Storage & index.** Each listing carries a `location` GeoJSON Point (§4),
+set from its ZIP on create/update and by `seed.py`, and lazily backfilled
+for older rows the first time a geo search or a Smart Match touches them
+(same pattern as `embedding`). A `2dsphere` index on `location` backs the
+query; it naturally skips documents with no point, so a listing whose ZIP
+didn't geocode is simply absent from distance results rather than an error.
+
+**Search.** `GET /listings` takes `lat`/`lng`/`radiusMiles` (default 25).
+When the request has an origin — explicit coordinates ("near me"), or a
+`zipCode` that geocodes — it runs a `$geoNear` aggregation: distance-bounded,
+nearest-first, with `distanceMiles` reported on each result. A `zipCode`
+that isn't a real ZCTA falls back to the original prefix match on the ZIP
+string, so nothing regresses. `lat`/`lng`/`distanceMiles` are projected onto
+`ListingPublic` from the stored `location` by a before-validator, so they're
+response-only — the DB is the single source of truth for the point.
+
+**Matching.** `POST /matching/recommend` accepts `lat`/`lng` and geocodes
+`zipCode` the same way; the reranker's old flat exact-ZIP / shared-prefix
+bonus is now the exponential distance-decay term described above.
+
+**Frontend.** The Landing results view is an Airbnb-style split: cards on the
+left, a **Leaflet + OpenStreetMap** map on the right (sticky on desktop) with
+a marker per result whose popup opens the listing detail modal. A radius
+selector and a "Use my location" button (browser geolocation → the radius
+search) sit under the search bar; cards and popups show "x mi away".
+
+**Design choices / limitations:**
+
+- **No external geocoder.** An address-level geocoder (Nominatim, Census,
+  Mapbox) would be more accurate but needs network + keys, is
+  non-deterministic (CI flakiness), and there's no street address stored to
+  geocode. The vendored centroid table is offline, deterministic, and
+  free — see §10.
+- **Leaflet + OSM raster tiles**, chosen over MapLibre GL / Mapbox GL for
+  zero API keys and no billable account. Uses OpenStreetMap's public tile
+  server, which is fine at this traffic but would need a proper tile
+  provider at scale (§11).
+- **Still a brute-force scan in the matcher** (the `$geoNear` path in
+  `GET /listings` does use the index); no ANN / geo pre-filter there —
+  fine at hundreds of listings.
 
 ### Hosting
 
@@ -528,7 +590,11 @@ creating a duplicate account.
 | `rating` | float \| null | **Fabricated in v1** (hardcoded 4.7 on every listing). Real now (§3's "Review system"): the average of that listing's reviews, recomputed on every `POST /reviews/`; `null` until the first one. |
 | `reviewCount` | int | Real count of reviews, defaults to `0` (not `null` — unlike `rating`, zero is an honest value from the moment a listing exists). |
 | `embedding` | float[384] \| null | Sentence embedding of `title` + `description` (`all-MiniLM-L6-v2`), used by `/matching/recommend` for semantic search (§3). Written on listing create/update; `null` if embeddings were disabled or the model was unavailable at write time, in which case `/matching/recommend` backfills it lazily on the next search. Never returned in API responses. |
+| `location` | GeoJSON Point \| null | `{"type": "Point", "coordinates": [lng, lat]}` — the centroid of `zipCode` (§3's "Geography & distance search"). Set on create/update and by `seed.py`; `null` when the ZIP didn't geocode, backfilled lazily on the next geo search. Not returned directly — `ListingPublic` projects it to `lat`/`lng` (and a search adds `distanceMiles`). |
 | `createdAt` | datetime | |
+
+**Indexes:** `2dsphere` on `location`, required by the `$geoNear`
+radius-search aggregation (§3).
 
 ### `reservations`
 
@@ -1014,6 +1080,34 @@ that supersedes it and say why.
   (§11). Did not add review edit/delete, host-reviews-renter, or moderation
   — none were asked for, and the create+read scope shipped is a complete,
   independently useful slice on its own.
+- **2026-09-03** — Phase 4: real geography. Two tradeoff decisions, both
+  made with the project owner:
+  - **Geocoding = vendored ZIP-centroid table** (US Census 2020 ZCTA
+    gazetteer, public domain, committed as `app/data/zip_centroids.csv`),
+    over (a) an address-level geocoder API — rejected because it needs
+    network + keys, is non-deterministic (CI), and no street address is
+    stored to geocode — and (b) a host pin-drop on a map — better accuracy
+    but a much larger frontend change, and it still needs a centroid
+    fallback for existing/seeded listings. Accepted cost: accuracy is
+    ZIP-centroid (~1–3 mi), stated plainly in the UI and §11. The table is
+    committed rather than downloaded at deploy time, same reasoning as the
+    pricing-model artifact and `docker-compose.yml` — a fresh clone works
+    offline.
+  - **Map library = Leaflet + OpenStreetMap** (`react-leaflet` v4 + free OSM
+    raster tiles), over MapLibre GL (needs a vector-tile/style source — the
+    free ones are rate-limited or need signup) and Mapbox GL (needs a
+    Mapbox account + access token, a billable account). Leaflet + OSM needs
+    no key and no account; OSM's public tile server is acceptable at this
+    traffic and flagged in §11 as needing a real provider at scale.
+  - Search became a `$geoNear` radius query (2dsphere index on a new
+    `listings.location` GeoJSON point), and the Smart Match reranker's flat
+    exact-ZIP / shared-prefix bonus became an exponential distance decay.
+    A `zipCode` that doesn't geocode falls back to the old prefix match, so
+    the change is purely additive for existing callers. Kept
+    `services/matching.py` a pure function (added only a stdlib haversine
+    import) so it still unit-tests without a DB or a model.
+  - **Not** in scope: the renter post-approval refund flow (still open, §11)
+    and address-level geocoding.
 
 Honest, current as of Phase 0:
 
@@ -1033,9 +1127,16 @@ Honest, current as of Phase 0:
 - **Pricing suggestions are a real trained model, but trained entirely on
   synthetic data** — there's still no real booking history. See §6 for the
   full limitations list; must be retrained once real data exists.
-- **Search is ZIP-prefix matching, not real geography.** No map, no
-  `$near` queries. This applies to the Smart Match reranker too — it boosts
-  exact/ZIP3 matches but has no notion of distance.
+- **Coordinates are ZIP-centroid, not rooftop.** As of Phase 4 search is a
+  real `$geoNear` radius query and the results have a map (§3), but every
+  listing's point is the centroid of its ZIP Code Tabulation Area (~1–3 mi
+  off in a typical suburban ZIP), because only a ZIP and a neighbourhood
+  `addressSummary` are stored. Good enough for "storage within N miles"; not
+  for "0.2 mi away" precision. An address-level geocoder or a host pin-drop
+  would fix it.
+- **The map uses OpenStreetMap's public tile server.** Fine at portfolio /
+  low traffic, but its usage policy expects a real tile provider (or a
+  self-hosted cache) for production volume.
 - **Smart Match has no relevance evaluation.** It's real semantic search as
   of Phase 2 (§3), but there's no labelled match-quality dataset, so its
   rerank weights are hand-set and there's no precision@k number — same
