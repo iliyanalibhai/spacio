@@ -2,7 +2,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 
 class StorageSize(str, Enum):
@@ -81,8 +81,38 @@ class ListingPublic(ListingBase):
     # reviewCount is a real count from the moment a listing exists, so it
     # defaults to 0 rather than None.
     reviewCount: int = 0
+    # ZIP-centroid coordinates, projected from the stored `location` GeoJSON
+    # Point (see the validator below). `distanceMiles` is only populated by the
+    # radius-search path in GET /listings and by /matching/recommend when the
+    # request carries an origin. See app/services/geo.py, docs/DOCUMENTATION.md §3.
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    distanceMiles: Optional[float] = None
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_location(cls, data: object) -> object:
+        """Expose the stored `location` GeoJSON Point as flat `lat`/`lng`.
+
+        Mongo stores `location` as `{"type": "Point", "coordinates": [lng, lat]}`
+        (the 2dsphere / $geoNear format). Callers do
+        `ListingPublic.model_validate(doc)` on the raw document, so unpack it
+        here rather than at every call site. Never mutates the input dict.
+        """
+        if not isinstance(data, dict):
+            return data
+        location = data.get("location")
+        if (
+            isinstance(location, dict)
+            and data.get("lat") is None
+            and data.get("lng") is None
+        ):
+            coordinates = location.get("coordinates")
+            if isinstance(coordinates, (list, tuple)) and len(coordinates) == 2:
+                return {**data, "lat": coordinates[1], "lng": coordinates[0]}
+        return data
 
 
 class ListingUpdate(BaseModel):

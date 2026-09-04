@@ -6,6 +6,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from PIL import Image, UnidentifiedImageError
+from pymongo import UpdateOne
 
 from app.core.paths import UPLOAD_DIR
 from app.deps.auth import get_current_user
@@ -13,6 +14,12 @@ from app.ml.embeddings import listing_text, safe_embed_one
 from app.models.schemas import ListingCreate, ListingPublic, ListingUpdate, StorageSize
 from app.db import get_db
 from app.services.capacity import CAPACITY_HOLDING_STATUSES
+from app.services.geo import (
+    METERS_PER_MILE,
+    MILES_PER_METER,
+    to_geojson_point,
+    zip_to_coords,
+)
 
 router = APIRouter()
 
@@ -29,6 +36,30 @@ def _size_bucket_for_sqft(sqft: float) -> StorageSize:
     if sqft <= 150:
         return StorageSize.medium
     return StorageSize.large
+
+
+def _location_for_zip(zip_code: str | None) -> dict | None:
+    """GeoJSON Point for a ZIP's centroid, or None if it can't be resolved
+    (a typo, or a PO-box-only ZIP the gazetteer omits). A None location just
+    means the listing won't appear in radius search until its ZIP is fixed."""
+    coords = zip_to_coords(zip_code)
+    return to_geojson_point(coords) if coords else None
+
+
+async def _backfill_missing_locations(db: AsyncIOMotorDatabase) -> None:
+    """Give a `location` to any listing created before geocoding existed (or
+    seeded without one). Runs only on the radius-search path, and only touches
+    rows that are actually missing the field, so it's a no-op once warm."""
+    missing = await db.listings.find(
+        {"location": {"$exists": False}}, {"zipCode": 1}
+    ).to_list(length=1000)
+    ops = [
+        UpdateOne({"_id": row["_id"]}, {"$set": {"location": location}})
+        for row in missing
+        if (location := _location_for_zip(row.get("zipCode"))) is not None
+    ]
+    if ops:
+        await db.listings.bulk_write(ops)
 
 
 @router.post("/", response_model=ListingPublic, status_code=status.HTTP_201_CREATED)
@@ -74,6 +105,10 @@ async def create_listing(
         # disabled or the model is unavailable — /matching/recommend
         # backfills it lazily in that case. See app/ml/embeddings.py.
         "embedding": None,
+        # GeoJSON Point (ZIP centroid) for the 2dsphere index / radius search.
+        # None when the ZIP can't be geocoded — _backfill_missing_locations
+        # retries it later. See app/services/geo.py.
+        "location": _location_for_zip(payload.zipCode),
         "createdAt": now,
     }
     doc["embedding"] = safe_embed_one(listing_text(doc))
@@ -89,11 +124,12 @@ async def list_listings(
     priceMin: Optional[float] = Query(default=None, ge=0),
     priceMax: Optional[float] = Query(default=None, ge=0),
     size: Optional[StorageSize] = None,
+    lat: Optional[float] = Query(default=None, ge=-90, le=90),
+    lng: Optional[float] = Query(default=None, ge=-180, le=180),
+    radiusMiles: float = Query(default=25, gt=0, le=500),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     filters: dict = {}
-    if zipCode:
-        filters["zipCode"] = {"$regex": f"^{zipCode}", "$options": "i"}
     if size:
         filters["size"] = size
     if priceMin is not None or priceMax is not None:
@@ -104,7 +140,42 @@ async def list_listings(
             price_filter["$lte"] = priceMax
         filters["pricePerMonth"] = price_filter
 
-    listings = await db.listings.find(filters).to_list(length=100)
+    # A search has a geographic origin when the caller passes explicit
+    # coordinates ("near me"), or when its ZIP geocodes to a centroid.
+    origin: Optional[tuple[float, float]] = None
+    if lat is not None and lng is not None:
+        origin = (lat, lng)
+    elif zipCode:
+        origin = zip_to_coords(zipCode)
+
+    distance_miles_by_id: dict[str, float] = {}
+    if origin is not None:
+        await _backfill_missing_locations(db)
+        # $geoNear must be the first pipeline stage; it filters by distance,
+        # sorts nearest-first, and reports the distance — all in one pass over
+        # the 2dsphere index. `query` applies the price/size filters before
+        # the distance sort.
+        geo_near: dict = {
+            "near": {"type": "Point", "coordinates": [origin[1], origin[0]]},
+            "distanceField": "distanceMeters",
+            "maxDistance": radiusMiles * METERS_PER_MILE,
+            "spherical": True,
+        }
+        if filters:
+            geo_near["query"] = filters
+        listings = await db.listings.aggregate(
+            [{"$geoNear": geo_near}, {"$limit": 100}]
+        ).to_list(length=100)
+        distance_miles_by_id = {
+            listing["_id"]: round(listing["distanceMeters"] * MILES_PER_METER, 1)
+            for listing in listings
+        }
+    else:
+        # No usable origin (no geo params, or a ZIP the gazetteer doesn't
+        # have): fall back to the original prefix match on the ZIP string.
+        if zipCode:
+            filters["zipCode"] = {"$regex": f"^{zipCode}", "$options": "i"}
+        listings = await db.listings.find(filters).to_list(length=100)
 
     if startDate and endDate:
         search_start = datetime.fromisoformat(startDate)
@@ -149,8 +220,13 @@ async def list_listings(
             r.get("sqftRequested", 0) for r in reservations_by_listing.get(listing["_id"], [])
         )
         listing["availableSqft"] = max(0, total_sqft - reserved_sqft)
+        if listing["_id"] in distance_miles_by_id:
+            listing["distanceMiles"] = distance_miles_by_id[listing["_id"]]
 
-    if zipCode:
+    if origin is not None:
+        # $geoNear already returned rows nearest-first.
+        pass
+    elif zipCode:
         listings.sort(
             key=lambda listing: (
                 0 if listing.get("zipCode") == zipCode else 1,
@@ -202,6 +278,10 @@ async def update_listing(
     # whenever either changes. Recompute from the merged document.
     if "title" in updates or "description" in updates:
         updates["embedding"] = safe_embed_one(listing_text({**listing, **updates}))
+
+    # Same story for the map point when the ZIP changes.
+    if "zipCode" in updates:
+        updates["location"] = _location_for_zip(updates["zipCode"])
 
     await db.listings.update_one({"_id": listing_id}, {"$set": updates})
     listing.update(updates)

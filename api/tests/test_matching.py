@@ -19,11 +19,16 @@ import pytest
 
 from app.services.matching import (
     DATE_MISS_PENALTY,
-    EXACT_ZIP_BONUS,
-    ZIP3_PREFIX_BONUS,
+    DECAY_MILES,
+    DISTANCE_WEIGHT,
     match_listings,
     score_listing,
 )
+
+# A few real coordinates for the distance-ranking tests.
+AUSTIN = (30.2943, -97.7385)
+AUSTIN_NEARBY = (30.32, -97.70)  # ~3 mi from AUSTIN
+DALLAS = (32.7767, -96.7970)  # ~180 mi from AUSTIN
 
 
 def _listing(**overrides) -> dict:
@@ -38,6 +43,11 @@ def _listing(**overrides) -> dict:
     }
     base.update(overrides)
     return base
+
+
+def _at(coords, **overrides) -> dict:
+    lat, lng = coords
+    return _listing(lat=lat, lng=lng, **overrides)
 
 
 class TestRanking:
@@ -61,20 +71,30 @@ class TestRanking:
 
         assert [lst["_id"] for lst in top] == ["live"]
 
-    def test_exact_zip_outranks_zip3_prefix_outranks_neither(self):
-        # Identical text relevance; only ZIP differs.
-        exact = _listing(_id="exact", embedding=[1.0, 0.0, 0.0], zipCode="78705")
-        prefix = _listing(_id="prefix", embedding=[1.0, 0.0, 0.0], zipCode="78701")
-        elsewhere = _listing(_id="elsewhere", embedding=[1.0, 0.0, 0.0], zipCode="90210")
+    def test_nearer_listing_outranks_farther_at_equal_relevance(self):
+        # Identical text relevance; only distance from the origin differs.
+        near = _at(AUSTIN_NEARBY, _id="near", embedding=[1.0, 0.0, 0.0])
+        far = _at(DALLAS, _id="far", embedding=[1.0, 0.0, 0.0])
+        nowhere = _listing(_id="nowhere", embedding=[1.0, 0.0, 0.0])  # no coords
 
         top, _ = match_listings(
-            [elsewhere, prefix, exact], self.QUERY, target_zip="78705"
+            [nowhere, far, near], self.QUERY, origin_coords=AUSTIN
         )
 
-        assert [lst["_id"] for lst in top] == ["exact", "prefix", "elsewhere"]
+        assert [lst["_id"] for lst in top] == ["near", "far", "nowhere"]
 
-    def test_zip_bonus_constants_are_ordered(self):
-        assert EXACT_ZIP_BONUS > ZIP3_PREFIX_BONUS > 0
+    def test_distance_constants_are_sane(self):
+        assert DISTANCE_WEIGHT > 0
+        assert DECAY_MILES > 0
+
+    def test_distance_is_neutral_without_an_origin(self):
+        near = _at(AUSTIN_NEARBY, _id="near", embedding=[1.0, 0.0, 0.0])
+        far = _at(DALLAS, _id="far", embedding=[1.0, 0.0, 0.0])
+
+        # No origin => distance term drops out, pure tie => _id order.
+        top, _ = match_listings([far, near], self.QUERY)
+
+        assert [lst["_id"] for lst in top] == ["far", "near"]
 
     def test_price_is_only_a_nudge_not_a_dominant_signal(self):
         # A strong text match at a high price must still beat a weak text
@@ -99,14 +119,14 @@ class TestRanking:
         assert [lst["_id"] for lst in top] == ["cheap", "pricey"]
 
     def test_none_query_vector_falls_back_to_structured_ranking(self):
-        far_cheap = _listing(_id="far", zipCode="90210", pricePerMonth=20.0)
-        near_pricey = _listing(_id="near", zipCode="78705", pricePerMonth=300.0)
+        far_cheap = _at(DALLAS, _id="far", pricePerMonth=20.0)
+        near_pricey = _at(AUSTIN_NEARBY, _id="near", pricePerMonth=300.0)
 
         top, explanation = match_listings(
-            [far_cheap, near_pricey], None, target_zip="78705"
+            [far_cheap, near_pricey], None, origin_coords=AUSTIN
         )
 
-        assert top[0]["_id"] == "near"  # exact-ZIP bonus outweighs the price nudge
+        assert top[0]["_id"] == "near"  # distance bonus outweighs the price nudge
         assert "unavailable" in explanation.lower()
 
     def test_date_window_miss_is_penalized(self):
@@ -150,11 +170,16 @@ class TestRanking:
         # all tied on score -> ascending _id order
         assert [lst["_id"] for lst in top] == ["l-0", "l-1", "l-2"]
 
-    def test_explanation_names_the_target_zip(self):
-        _, explanation = match_listings(
-            [_listing(embedding=[1.0, 0.0, 0.0])], self.QUERY, target_zip="78705"
+    def test_explanation_mentions_nearby_when_an_origin_is_given(self):
+        _, with_origin = match_listings(
+            [_at(AUSTIN, embedding=[1.0, 0.0, 0.0])], self.QUERY, origin_coords=AUSTIN
         )
-        assert "78705" in explanation
+        assert "nearby" in with_origin.lower()
+
+        _, without_origin = match_listings(
+            [_listing(embedding=[1.0, 0.0, 0.0])], self.QUERY
+        )
+        assert "nearby" not in without_origin.lower()
 
     def test_empty_input_yields_no_match_explanation(self):
         top, explanation = match_listings([], self.QUERY)

@@ -22,6 +22,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from app.core.config import settings
 from app.core.security import get_password_hash
 from app.ml.embeddings import listing_text, safe_embed_one
+from app.services.geo import to_geojson_point, zip_to_coords
 
 SEED_SOURCE = "seed.py"
 
@@ -180,6 +181,10 @@ async def seed() -> None:
     # /matching/recommend backfills it on the first search.
     for doc in listing_docs:
         doc["embedding"] = safe_embed_one(listing_text(doc))
+        # ZIP-centroid map point, same as the create-listing endpoint. All
+        # eight seed ZIPs are real TX ZCTAs, so every one resolves.
+        coords = zip_to_coords(str(doc["zipCode"]))
+        doc["location"] = to_geojson_point(coords) if coords else None
 
     await db.users.insert_one(host)
     await db.users.insert_one(renter)

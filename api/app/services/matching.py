@@ -3,7 +3,8 @@
 A renter describes what they need to store ("a road bike and a few boxes
 over winter") and this ranks listings by how close that description is, in
 meaning, to each listing's own title + description — then nudges the order
-with the structured signals (ZIP, price, availability).
+with the structured signals (distance from the search origin, price,
+availability).
 
 The semantic part is done with sentence embeddings (see
 `app/ml/embeddings.py`): every listing's text and the query are turned into
@@ -13,11 +14,12 @@ relevance score. Unlike the keyword dictionary this replaced, "bicycle",
 "cycling gear" and "somewhere for my bike" all land near a listing that
 says "great for cyclists" even with no shared words.
 
-This module is deliberately pure and model-free: it takes the query vector
-and listings that already carry an `embedding`, and does nothing but
-arithmetic — so it unit-tests with hand-built vectors and never imports
-torch. Producing the vectors (and lazily backfilling listings that predate
-this feature) is the router's job.
+This module is deliberately pure and model-free: it takes the query vector,
+an optional (lat, lng) origin, and listings that already carry an
+`embedding` and a `location`, and does nothing but arithmetic — so it
+unit-tests with hand-built vectors and never imports torch. Producing the
+vectors, geocoding the origin, and lazily backfilling listings that predate
+these features are the router's job.
 
 When `query_vector` is None — embeddings disabled, or the model failed to
 load — `match_listings` still returns a sane ordering from the structured
@@ -27,19 +29,28 @@ unavailable rather than pretending otherwise.
 
 from __future__ import annotations
 
+import math
 from datetime import date, datetime
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
+from app.services.geo import haversine_miles
+
+Coords = Tuple[float, float]  # (latitude, longitude)
+
 # Relative weights of the ranking signals. The semantic score is a cosine
 # similarity in roughly [0.0, 0.8] for related text; the others are small
-# additive nudges so that, among listings of similar relevance, a local /
+# additive nudges so that, among listings of similar relevance, a nearby /
 # cheaper / available one wins — without a far-away exact-text match ever
 # outranking a close-by near-match. Tune here, not in the router.
 SEMANTIC_WEIGHT = 1.0
-EXACT_ZIP_BONUS = 0.15
-ZIP3_PREFIX_BONUS = 0.07
+# Distance term: DISTANCE_WEIGHT at zero miles, decaying exponentially with a
+# ~DECAY_MILES scale length (≈0.37 * weight at DECAY_MILES, ≈0.14 at 2×). It
+# replaced a flat exact-ZIP / shared-3-digit-prefix bonus, which treated "one
+# block away in the next ZIP" and "40 miles away, same prefix" identically.
+DISTANCE_WEIGHT = 0.15
+DECAY_MILES = 15.0
 PRICE_WEIGHT = 0.08  # max contribution, for a nominally free listing
 DATE_FIT_BONUS = 0.05
 DATE_MISS_PENALTY = -0.5
@@ -103,21 +114,36 @@ def _date_fit_score(
     return DATE_FIT_BONUS
 
 
-def _zip_score(listing: dict, target_zip: Optional[str]) -> float:
-    if not target_zip:
+def _listing_coords(listing: dict) -> Optional[Coords]:
+    """(lat, lng) for a listing, from either a flat lat/lng pair (test
+    fixtures) or a stored `location` GeoJSON Point (real Mongo docs)."""
+    lat, lng = listing.get("lat"), listing.get("lng")
+    if lat is not None and lng is not None:
+        return (float(lat), float(lng))
+    location = listing.get("location")
+    if isinstance(location, dict):
+        coordinates = location.get("coordinates")
+        if isinstance(coordinates, (list, tuple)) and len(coordinates) == 2:
+            return (float(coordinates[1]), float(coordinates[0]))
+    return None
+
+
+def _distance_score(listing: dict, origin_coords: Optional[Coords]) -> float:
+    """Exponential distance decay from the search origin. Neutral (0.0) when
+    the caller gave no origin or the listing has no coordinates."""
+    if origin_coords is None:
         return 0.0
-    listing_zip = str(listing.get("zipCode") or "")
-    if listing_zip == target_zip:
-        return EXACT_ZIP_BONUS
-    if len(target_zip) >= 3 and listing_zip[:3] == target_zip[:3]:
-        return ZIP3_PREFIX_BONUS
-    return 0.0
+    listing_coords = _listing_coords(listing)
+    if listing_coords is None:
+        return 0.0
+    miles = haversine_miles(origin_coords, listing_coords)
+    return DISTANCE_WEIGHT * math.exp(-miles / DECAY_MILES)
 
 
 def score_listing(
     listing: dict,
     query_vector: Optional[Sequence[float]],
-    target_zip: Optional[str] = None,
+    origin_coords: Optional[Coords] = None,
     want_from: Optional[date] = None,
     want_to: Optional[date] = None,
 ) -> float:
@@ -132,7 +158,7 @@ def score_listing(
     if query_vector is not None and listing_vec:
         score += SEMANTIC_WEIGHT * _cosine(query_vector, listing_vec)
 
-    score += _zip_score(listing, target_zip)
+    score += _distance_score(listing, origin_coords)
     score += _price_score(listing)
     score += _date_fit_score(listing, want_from, want_to)
     return score
@@ -140,7 +166,7 @@ def score_listing(
 
 def _explanation(
     query_vector: Optional[Sequence[float]],
-    target_zip: Optional[str],
+    has_origin: bool,
     n: int,
 ) -> str:
     if n == 0:
@@ -148,7 +174,7 @@ def _explanation(
     if query_vector is None:
         base = (
             f"Showing {n} available space{'s' if n != 1 else ''}, ranked by "
-            "price and location. (Semantic matching is unavailable right now, "
+            "price and distance. (Semantic matching is unavailable right now, "
             "so this isn't ranked by how well each description matches what "
             "you typed.)"
         )
@@ -157,7 +183,7 @@ def _explanation(
             f"These {n} space{'s' if n != 1 else ''} have the listing "
             "descriptions closest in meaning to what you described"
         )
-        base += f", with spaces in {target_zip} moved up" if target_zip else ""
+        base += ", with nearby spaces moved up" if has_origin else ""
         base += "."
     return base
 
@@ -165,7 +191,7 @@ def _explanation(
 def match_listings(
     listings: list[dict],
     query_vector: Optional[Sequence[float]],
-    target_zip: Optional[str] = None,
+    origin_coords: Optional[Coords] = None,
     want_from: Optional[date] = None,
     want_to: Optional[date] = None,
     top_n: int = TOP_N_DEFAULT,
@@ -181,9 +207,9 @@ def match_listings(
     ranked = sorted(
         candidates,
         key=lambda lst: (
-            -score_listing(lst, query_vector, target_zip, want_from, want_to),
+            -score_listing(lst, query_vector, origin_coords, want_from, want_to),
             str(lst.get("_id", "")),
         ),
     )
     top = ranked[:top_n]
-    return top, _explanation(query_vector, target_zip, len(top))
+    return top, _explanation(query_vector, origin_coords is not None, len(top))
