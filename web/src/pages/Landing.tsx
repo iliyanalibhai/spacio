@@ -4,21 +4,32 @@ import type { Listing, StorageSize } from "../types";
 import * as listingApi from "../api/listings";
 import { ListingCard } from "../components/ListingCard";
 import { ListingDetailModal } from "../components/ListingDetailModal";
+import { ResultsMap } from "../components/ResultsMap";
 import { formatDateOnly } from "../lib/formatDate";
 
+type Filters = {
+  zipCode?: string;
+  startDate?: string;
+  endDate?: string;
+  priceMin?: number;
+  priceMax?: number;
+  size?: StorageSize;
+  lat?: number;
+  lng?: number;
+  radiusMiles: number;
+};
+
+const RADIUS_OPTIONS = [5, 10, 25, 50];
+
 export function Landing() {
-  const [filters, setFilters] = useState<{
-    zipCode?: string;
-    startDate?: string;
-    endDate?: string;
-    priceMin?: number;
-    priceMax?: number;
-    size?: StorageSize;
-  }>({});
+  const [filters, setFilters] = useState<Filters>({ radiusMiles: 25 });
   const [selected, setSelected] = useState<Listing | null>(null);
   const [showPaymentSuccess, setShowPaymentSuccess] = useState(false);
+  const [geoError, setGeoError] = useState<string | null>(null);
 
-  const shouldSearch = (filters.zipCode?.length ?? 0) >= 1;
+  const usingMyLocation = filters.lat != null && filters.lng != null;
+  const shouldSearch = (filters.zipCode?.length ?? 0) >= 1 || usingMyLocation;
+  const origin = usingMyLocation ? { lat: filters.lat!, lng: filters.lng! } : null;
 
   const { data: listings = [], isLoading } = useQuery({
     queryKey: ["listings", filters],
@@ -34,6 +45,27 @@ export function Landing() {
       setTimeout(() => setShowPaymentSuccess(false), 5000);
     }
   }, []);
+
+  const useMyLocation = () => {
+    setGeoError(null);
+    if (!navigator.geolocation) {
+      setGeoError("Your browser can't share a location.");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) =>
+        setFilters((f) => ({
+          ...f,
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+        })),
+      () => setGeoError("Couldn't get your location. Try a ZIP code instead."),
+      { timeout: 10000 }
+    );
+  };
+
+  const clearMyLocation = () =>
+    setFilters((f) => ({ ...f, lat: undefined, lng: undefined }));
 
   return (
     <main className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
@@ -108,6 +140,43 @@ export function Landing() {
                 </div>
               </div>
             </div>
+
+            <div className="flex flex-wrap items-center gap-3 border-t border-slate-100 px-3 py-2 text-sm">
+              <label className="flex items-center gap-2 text-slate-600">
+                Within
+                <select
+                  value={filters.radiusMiles}
+                  onChange={(e) =>
+                    setFilters((f) => ({ ...f, radiusMiles: Number(e.target.value) }))
+                  }
+                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 font-medium text-slate-800"
+                >
+                  {RADIUS_OPTIONS.map((mi) => (
+                    <option key={mi} value={mi}>
+                      {mi} miles
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {usingMyLocation ? (
+                <button
+                  type="button"
+                  onClick={clearMyLocation}
+                  className="inline-flex items-center gap-1 rounded-full bg-brand-50 px-3 py-1 font-medium text-brand-700"
+                >
+                  Near your location <span aria-hidden>×</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={useMyLocation}
+                  className="font-medium text-brand-600 hover:text-brand-700"
+                >
+                  Use my location
+                </button>
+              )}
+              {geoError && <span className="text-red-600">{geoError}</span>}
+            </div>
           </div>
 
           <div className="flex flex-wrap justify-center gap-6 mt-8 text-white/90">
@@ -133,7 +202,9 @@ export function Landing() {
                   {isLoading ? "Searching..." : `${listings.length} ${listings.length === 1 ? "space" : "spaces"} available`}
                 </h2>
                 <p className="text-slate-600">
-                  {filters.zipCode && `matching "${filters.zipCode}"`}
+                  {usingMyLocation
+                    ? `within ${filters.radiusMiles} miles of you`
+                    : filters.zipCode && `within ${filters.radiusMiles} miles of ${filters.zipCode}`}
                   {filters.startDate && filters.endDate &&
                     ` • ${formatDateOnly(filters.startDate)} - ${formatDateOnly(filters.endDate)}`}
                 </p>
@@ -158,15 +229,22 @@ export function Landing() {
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-brand-600"></div>
               </div>
             ) : listings.length > 0 ? (
-              <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-                {listings.map((listing, index) => (
-                  <ListingCard key={listing._id} listing={listing} index={index} onClick={() => setSelected(listing)} />
-                ))}
+              <div className="grid gap-6 lg:grid-cols-[1fr_minmax(340px,400px)]">
+                <div className="order-2 lg:order-1 grid gap-6 sm:grid-cols-2 lg:grid-cols-1">
+                  {listings.map((listing, index) => (
+                    <ListingCard key={listing._id} listing={listing} index={index} onClick={() => setSelected(listing)} />
+                  ))}
+                </div>
+                <div className="order-1 lg:order-2">
+                  <div className="h-64 lg:sticky lg:top-24 lg:h-[calc(100vh-8rem)]">
+                    <ResultsMap listings={listings} origin={origin} onSelect={setSelected} />
+                  </div>
+                </div>
               </div>
             ) : (
               <div className="text-center py-12">
                 <h3 className="mt-4 text-lg font-semibold text-slate-900">No spaces available</h3>
-                <p className="mt-1 text-slate-500">Try adjusting your dates or searching a different area.</p>
+                <p className="mt-1 text-slate-500">Try a wider radius, different dates, or another area.</p>
               </div>
             )}
           </section>

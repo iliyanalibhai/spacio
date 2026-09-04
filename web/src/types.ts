@@ -24,6 +24,12 @@ export type Listing = {
   reviewCount?: number;
   createdAt: string;
   hostVerified?: boolean;
+  // ZIP-centroid coordinates (see api/app/services/geo.py). Null when the
+  // listing's ZIP couldn't be geocoded. `distanceMiles` is only present on
+  // results from a radius search or a Smart Match with an origin.
+  lat?: number | null;
+  lng?: number | null;
+  distanceMiles?: number | null;
 };
 
 export type Reservation = {
