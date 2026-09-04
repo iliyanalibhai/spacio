@@ -1,5 +1,6 @@
 import type { Listing } from "../types";
 import { getListingImage, fallbackListingImage } from "../lib/getListingImage";
+import { formatDistance } from "../lib/geo";
 
 export function ListingCard({
   listing,
@@ -12,6 +13,7 @@ export function ListingCard({
 }) {
   const imageUrl = getListingImage(listing, index);
   const availableSqft = listing.availableSqft ?? listing.sizeSqft ?? 100;
+  const distanceLabel = formatDistance(listing.distanceMiles);
 
   return (
     <div onClick={onClick} className="group cursor-pointer">
@@ -48,7 +50,10 @@ export function ListingCard({
             </div>
           )}
         </div>
-        <p className="text-slate-500 text-sm mt-0.5">{listing.addressSummary}</p>
+        <p className="text-slate-500 text-sm mt-0.5">
+          {listing.addressSummary}
+          {distanceLabel && <span className="text-slate-400"> · {distanceLabel}</span>}
+        </p>
         <p className="text-slate-500 text-sm">
           {listing.sizeSqft ? `${listing.sizeSqft} sqft total` : listing.size} • {listing.zipCode}
         </p>

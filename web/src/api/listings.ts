@@ -8,6 +8,10 @@ export async function fetchListings(params: {
   priceMin?: number;
   priceMax?: number;
   size?: StorageSize;
+  // A ZIP alone geocodes server-side; lat/lng override it ("near me").
+  lat?: number;
+  lng?: number;
+  radiusMiles?: number;
 }) {
   const { data } = await api.get<Listing[]>("/listings", { params });
   return data;
