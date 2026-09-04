@@ -10,6 +10,7 @@ from pymongo import UpdateOne
 from app.db import get_db
 from app.ml.embeddings import EmbeddingsDisabled, embed, embed_one, listing_text
 from app.models.schemas import ListingPublic
+from app.services.geo import haversine_miles, to_geojson_point, zip_to_coords
 from app.services.matching import match_listings
 
 router = APIRouter()
@@ -19,6 +20,10 @@ logger = logging.getLogger(__name__)
 class MatchRequest(BaseModel):
     query: str
     zipCode: Optional[str] = None
+    # Explicit coordinates ("near me") take precedence over zipCode when both
+    # are sent.
+    lat: Optional[float] = None
+    lng: Optional[float] = None
     # Optional: the SmartMatch UI doesn't collect dates yet, but when it
     # does, listings whose availability window covers the stay are nudged up
     # and ones that clearly don't are pushed down.
@@ -51,9 +56,37 @@ async def _ensure_listing_embeddings(
     logger.info("backfilled embeddings for %d listing(s)", len(ops))
 
 
+async def _ensure_listing_locations(
+    db: AsyncIOMotorDatabase, rows: List[dict]
+) -> None:
+    """Backfill the map point for any listing missing one whose ZIP resolves,
+    persisting it once. Mutates `rows` in place. Never raises — a ZIP that
+    doesn't geocode is just left without a `location`."""
+    ops = []
+    for row in rows:
+        if row.get("location"):
+            continue
+        coords = zip_to_coords(row.get("zipCode"))
+        if coords is None:
+            continue
+        row["location"] = to_geojson_point(coords)
+        ops.append(UpdateOne({"_id": row["_id"]}, {"$set": {"location": row["location"]}}))
+    if ops:
+        await db.listings.bulk_write(ops)
+        logger.info("backfilled locations for %d listing(s)", len(ops))
+
+
 @router.post("/recommend", response_model=MatchResponse)
 async def recommend(payload: MatchRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
     rows = await db.listings.find({}).to_list(length=500)
+    await _ensure_listing_locations(db, rows)
+
+    # Explicit coordinates win; otherwise geocode the ZIP if there is one.
+    origin: Optional[tuple[float, float]] = None
+    if payload.lat is not None and payload.lng is not None:
+        origin = (payload.lat, payload.lng)
+    elif payload.zipCode:
+        origin = zip_to_coords(payload.zipCode)
 
     query_vector: Optional[list[float]] = None
     try:
@@ -69,11 +102,17 @@ async def recommend(payload: MatchRequest, db: AsyncIOMotorDatabase = Depends(ge
     top, explanation = match_listings(
         rows,
         query_vector,
-        target_zip=payload.zipCode,
+        origin_coords=origin,
         want_from=payload.availableFrom,
         want_to=payload.availableTo,
     )
-    return MatchResponse(
-        listings=[ListingPublic.model_validate(listing) for listing in top],
-        explanation=explanation,
-    )
+
+    listings_out = []
+    for listing in top:
+        model = ListingPublic.model_validate(listing)
+        if origin is not None and model.lat is not None and model.lng is not None:
+            model.distanceMiles = round(
+                haversine_miles(origin, (model.lat, model.lng)), 1
+            )
+        listings_out.append(model)
+    return MatchResponse(listings=listings_out, explanation=explanation)

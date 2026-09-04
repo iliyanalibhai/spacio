@@ -45,3 +45,9 @@ async def ensure_indexes() -> None:
     # slip both through.
     await db.reviews.create_index("reservationId", unique=True)
     await db.reviews.create_index("listingId")
+    # Radius search (GET /listings?lat=&lng=, and any zipCode search that
+    # geocodes) runs a $geoNear aggregation, which requires a 2dsphere index
+    # on the GeoJSON point it searches. 2dsphere naturally skips documents
+    # with no `location`, so listings whose ZIP didn't geocode are simply
+    # absent from geo results rather than erroring. See app/routers/listings.py.
+    await db.listings.create_index([("location", "2dsphere")])
