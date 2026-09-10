@@ -14,14 +14,23 @@ PENDING = ReservationStatus.pending
 CONFIRMED = ReservationStatus.confirmed
 DECLINED = ReservationStatus.declined
 EXPIRED = ReservationStatus.expired
+CANCELLED = ReservationStatus.cancelled
 
 
 @pytest.mark.parametrize(
     "target",
-    [CONFIRMED, DECLINED, EXPIRED],
+    [CONFIRMED, DECLINED, EXPIRED, CANCELLED],
 )
 def test_pending_can_transition_to_terminal_states(target):
     assert can_transition(PENDING, target)
+
+
+def test_confirmed_can_only_transition_to_cancelled():
+    """A renter cancelling an approved booking is the one transition out of
+    confirmed — it triggers the tiered refund."""
+    assert can_transition(CONFIRMED, CANCELLED)
+    assert not can_transition(CONFIRMED, DECLINED)
+    assert not can_transition(CONFIRMED, EXPIRED)
 
 
 @pytest.mark.parametrize(
@@ -34,6 +43,8 @@ def test_pending_can_transition_to_terminal_states(target):
         (DECLINED, DECLINED),
         (EXPIRED, CONFIRMED),
         (PENDING, PENDING),
+        (CANCELLED, CONFIRMED),
+        (CANCELLED, CANCELLED),
     ],
 )
 def test_terminal_states_cannot_transition(current, target):

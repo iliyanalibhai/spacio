@@ -16,6 +16,7 @@ class ReservationStatus(str, Enum):
     confirmed = "confirmed"
     declined = "declined"
     expired = "expired"
+    cancelled = "cancelled"
 
 
 class UserCreate(BaseModel):
@@ -156,6 +157,7 @@ class ReservationPublic(BaseModel):
     insuranceCost: float = 0
     totalPrice: float
     paymentStatus: str
+    refundedAmount: Optional[float] = None
     holdExpiresAt: datetime
     createdAt: datetime
 
