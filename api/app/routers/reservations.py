@@ -9,9 +9,11 @@ from app.deps.auth import get_current_user
 from app.db import get_db
 from app.models.schemas import ReservationCreate, ReservationPublic, ReservationStatus
 from app.services.capacity import CAPACITY_HOLDING_STATUSES, available_sqft_for_range
+from app.services.refund_policy import CancellationNotAllowedError, decide_refund
 from app.services.reservation_payments import (
     capture_reservation_payment,
     cancel_reservation_payment,
+    refund_reservation_payment,
 )
 from app.services.reservation_pricing import (
     DeclaredValueTooHighError,
@@ -222,6 +224,54 @@ async def decline_reservation(
     return ReservationPublic.model_validate(reservation)
 
 
+@router.post("/{reservation_id}/cancel", response_model=ReservationPublic)
+async def cancel_reservation(
+    reservation_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Renter-initiated cancellation.
+
+    Before the host approves, this just releases the authorization hold
+    (same effect as the host declining). After approval — when the payment
+    is already captured — it issues the tiered refund from
+    `services.refund_policy` (full >=72h before the start date, 50% inside
+    that window, nothing once the stay has started). Either way the
+    reservation ends in `cancelled`, which frees the capacity it was
+    holding.
+    """
+    reservation, listing = await _load_reservation_and_listing(db, reservation_id)
+    if reservation.get("renterId") != current_user["_id"]:
+        raise HTTPException(status_code=403, detail="Not authorized for this reservation")
+
+    try:
+        assert_transition(ReservationStatus(reservation["status"]), ReservationStatus.cancelled)
+    except InvalidTransitionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if reservation.get("paymentStatus") == "captured":
+        try:
+            decision = decide_refund(
+                reservation["totalPrice"], reservation["startDate"], datetime.utcnow()
+            )
+        except CancellationNotAllowedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        await refund_reservation_payment(
+            db, reservation, amount_cents=decision.refund_cents, tier=decision.tier
+        )
+        reservation["paymentStatus"] = "refunded" if decision.tier == "full" else "partially_refunded"
+        reservation["refundedAmount"] = decision.refund_amount
+    else:
+        await cancel_reservation_payment(db, reservation)
+        reservation["paymentStatus"] = "canceled"
+
+    await db.reservations.update_one(
+        {"_id": reservation_id}, {"$set": {"status": ReservationStatus.cancelled}}
+    )
+    reservation["status"] = ReservationStatus.cancelled
+    return ReservationPublic.model_validate(reservation)
+
+
 @router.get("/", response_model=List[ReservationPublic])
 async def list_my_reservations(
     db: AsyncIOMotorDatabase = Depends(get_db),
@@ -255,11 +305,17 @@ async def delete_reservation(
     if not (is_host_owner or is_renter):
         raise HTTPException(status_code=403, detail="Not authorized for this reservation")
 
-    # Release any live authorization hold before deleting. Deliberately
-    # skipped once paymentStatus is "captured" — the renter has actually
-    # been charged by then, and PaymentIntent.cancel can't undo a capture
-    # (that needs a real refund flow, out of scope here); mislabeling a
-    # captured payment "canceled" would be worse than leaving it alone.
+    # A confirmed booking has captured money behind it and can't just be
+    # deleted — the renter cancels it through POST /{id}/cancel, which runs
+    # the refund policy. DELETE stays for tearing down a still-pending
+    # request or clearing a terminal (declined/expired/cancelled) record.
+    if reservation.get("status") == ReservationStatus.confirmed:
+        raise HTTPException(
+            status_code=409,
+            detail="Cancel a confirmed reservation via POST /reservations/{id}/cancel",
+        )
+
+    # Release any live authorization hold before deleting.
     if reservation.get("paymentStatus") in ("pending_payment", "authorized", "payment_expired"):
         await cancel_reservation_payment(db, reservation)
 

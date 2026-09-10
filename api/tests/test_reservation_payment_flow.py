@@ -143,9 +143,12 @@ async def test_delete_pending_reservation_releases_authorization(
     stripe_payment_intent_stub.cancel.assert_called_once_with("pi_test_fake")
 
 
-async def test_delete_confirmed_reservation_does_not_touch_a_captured_payment(
+async def test_delete_confirmed_reservation_is_refused(
     client, verified_host, registered_renter, reservation, stripe_payment_intent_stub
 ):
+    """A confirmed booking has captured money behind it — DELETE now 409s
+    and points at POST /{id}/cancel (the refund path). Covered end-to-end in
+    test_reservation_cancel.py."""
     await _mark_authorized(reservation["_id"])
     approve = await client.post(f"/reservations/{reservation['_id']}/approve", headers=_auth(verified_host))
     assert approve.status_code == 200
@@ -153,5 +156,7 @@ async def test_delete_confirmed_reservation_does_not_touch_a_captured_payment(
 
     resp = await client.delete(f"/reservations/{reservation['_id']}", headers=_auth(registered_renter))
 
-    assert resp.status_code == 204
+    assert resp.status_code == 409
     stripe_payment_intent_stub.cancel.assert_not_called()
+    db = get_db()
+    assert await db.reservations.find_one({"_id": reservation["_id"]}) is not None
