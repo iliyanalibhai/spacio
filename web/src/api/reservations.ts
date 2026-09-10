@@ -32,3 +32,11 @@ export async function declineReservation(id: string) {
 export async function deleteReservation(id: string) {
   await api.delete(`/reservations/${id}`);
 }
+
+// Renter-initiated cancellation. Before host approval this just releases the
+// payment hold; after approval it runs the tiered refund (see
+// lib/refundPolicy.ts) and the reservation ends in "cancelled".
+export async function cancelReservation(id: string) {
+  const { data } = await api.post<Reservation>(`/reservations/${id}/cancel`);
+  return data;
+}
