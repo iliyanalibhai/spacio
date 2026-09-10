@@ -42,7 +42,7 @@ export type Reservation = {
   numBoxes: number;
   insuranceDeclaredValue?: number | null;
   hasOwnInsurance: boolean;
-  status: "pending_host_confirmation" | "confirmed" | "declined" | "expired";
+  status: "pending_host_confirmation" | "confirmed" | "declined" | "expired" | "cancelled";
   basePrice: number;
   serviceFee: number;
   boxCost: number;
@@ -51,7 +51,17 @@ export type Reservation = {
   // "pending_payment" until the renter completes Stripe Checkout,
   // "authorized" once the card hold is placed (manual capture), "captured"
   // once the host approves, "canceled"/"payment_expired" otherwise.
-  paymentStatus: "pending_payment" | "authorized" | "captured" | "canceled" | "payment_expired";
+  // "refunded"/"partially_refunded" after a renter cancels a confirmed
+  // booking (see refundPolicy.ts).
+  paymentStatus:
+    | "pending_payment"
+    | "authorized"
+    | "captured"
+    | "canceled"
+    | "payment_expired"
+    | "refunded"
+    | "partially_refunded";
+  refundedAmount?: number | null;
   holdExpiresAt: string;
   createdAt: string;
 };

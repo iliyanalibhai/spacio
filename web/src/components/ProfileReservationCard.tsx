@@ -15,6 +15,7 @@ const statusConfig = {
   confirmed: { bg: "bg-emerald-100", text: "text-emerald-700", label: "Confirmed" },
   declined: { bg: "bg-red-100", text: "text-red-700", label: "Declined" },
   expired: { bg: "bg-slate-100", text: "text-slate-600", label: "Expired" },
+  cancelled: { bg: "bg-slate-100", text: "text-slate-600", label: "Cancelled" },
 } as const;
 
 const PAYMENT_STATUS_LABEL: Record<Reservation["paymentStatus"], string> = {
@@ -23,6 +24,8 @@ const PAYMENT_STATUS_LABEL: Record<Reservation["paymentStatus"], string> = {
   captured: "Payment captured",
   canceled: "Not charged",
   payment_expired: "Payment session expired",
+  refunded: "Refunded in full",
+  partially_refunded: "Partially refunded",
 };
 
 export function ProfileReservationCard({ reservation }: { reservation: Reservation }) {
@@ -131,6 +134,9 @@ export function ProfileReservationCard({ reservation }: { reservation: Reservati
             </div>
             <span className={`text-xs ${needsPayment ? "text-amber-600 font-medium" : "text-slate-500"}`}>
               {PAYMENT_STATUS_LABEL[reservation.paymentStatus]}
+              {reservation.paymentStatus === "partially_refunded" && reservation.refundedAmount != null
+                ? ` ($${reservation.refundedAmount.toFixed(2)})`
+                : ""}
             </span>
             {needsPayment && (
               <button

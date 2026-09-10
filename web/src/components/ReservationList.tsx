@@ -4,6 +4,7 @@ import type { Message, Reservation } from "../types";
 import * as reservationApi from "../api/reservations";
 import * as paymentsApi from "../api/payments";
 import * as messageApi from "../api/messages";
+import { estimateRefund } from "../lib/refundPolicy";
 
 const PAYMENT_STATUS_LABEL: Record<Reservation["paymentStatus"], string> = {
   pending_payment: "Awaiting renter payment",
@@ -11,6 +12,8 @@ const PAYMENT_STATUS_LABEL: Record<Reservation["paymentStatus"], string> = {
   captured: "Payment captured",
   canceled: "Payment canceled",
   payment_expired: "Payment session expired",
+  refunded: "Refunded in full",
+  partially_refunded: "Partially refunded",
 };
 
 export function ReservationList({ asHost }: { asHost: boolean }) {
@@ -33,6 +36,7 @@ export function ReservationList({ asHost }: { asHost: boolean }) {
 
 function ReservationCard({ reservation, asHost }: { reservation: Reservation; asHost: boolean }) {
   const [showMessages, setShowMessages] = useState(false);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
   const { data: messages = [], refetch } = useQuery({
     queryKey: ["messages", reservation._id],
     queryFn: () => messageApi.listMessages(reservation._id),
@@ -55,8 +59,11 @@ function ReservationCard({ reservation, asHost }: { reservation: Reservation; as
     onSuccess: invalidateReservations,
   });
   const cancel = useMutation({
-    mutationFn: () => reservationApi.deleteReservation(reservation._id),
-    onSuccess: invalidateReservations,
+    mutationFn: () => reservationApi.cancelReservation(reservation._id),
+    onSuccess: () => {
+      setConfirmingCancel(false);
+      invalidateReservations();
+    },
   });
   const retryPayment = useMutation({
     mutationFn: () => paymentsApi.startReservationCheckout(reservation._id),
@@ -74,6 +81,18 @@ function ReservationCard({ reservation, asHost }: { reservation: Reservation; as
     reservation.status === "pending_host_confirmation" &&
     (reservation.paymentStatus === "pending_payment" || reservation.paymentStatus === "payment_expired");
   const canApprove = reservation.paymentStatus === "authorized";
+
+  const canCancel =
+    !asHost &&
+    (reservation.status === "pending_host_confirmation" || reservation.status === "confirmed");
+  // Only a confirmed booking has money to refund; before approval a cancel
+  // just releases the hold.
+  const refund =
+    reservation.status === "confirmed"
+      ? estimateRefund(reservation.startDate, reservation.totalPrice)
+      : null;
+  const cancelError = (cancel.error as { response?: { data?: { detail?: string } } })?.response?.data
+    ?.detail;
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -126,19 +145,55 @@ function ReservationCard({ reservation, asHost }: { reservation: Reservation; as
             {retryPayment.isPending ? "Opening Stripe..." : "Complete payment"}
           </button>
         )}
-        {!asHost && (
+        {canCancel && !confirmingCancel && (
           <button
             className="text-sm text-red-600 underline"
-            onClick={() => cancel.mutate()}
-            disabled={cancel.isPending}
+            onClick={() => setConfirmingCancel(true)}
           >
-            {cancel.isPending ? "Cancelling..." : "Cancel reservation"}
+            Cancel reservation
           </button>
         )}
         <button className="text-sm text-brand-600 underline" onClick={() => setShowMessages((s) => !s)}>
           {showMessages ? "Hide messages" : "Messages"}
         </button>
       </div>
+      {confirmingCancel && (
+        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3">
+          <p className="text-sm text-slate-700">
+            {refund
+              ? refund.message
+              : "You haven't been charged yet — cancelling just releases the payment hold."}
+          </p>
+          {refund?.tier === "none" ? (
+            <button
+              className="mt-2 text-sm text-slate-500 underline"
+              onClick={() => setConfirmingCancel(false)}
+            >
+              Close
+            </button>
+          ) : (
+            <div className="mt-2 flex gap-2">
+              <button
+                onClick={() => cancel.mutate()}
+                disabled={cancel.isPending}
+                className="rounded-lg bg-red-600 px-3 py-1 text-sm text-white disabled:opacity-50"
+              >
+                {cancel.isPending ? "Cancelling..." : "Yes, cancel"}
+              </button>
+              <button
+                onClick={() => setConfirmingCancel(false)}
+                disabled={cancel.isPending}
+                className="text-sm text-slate-500 underline"
+              >
+                Keep reservation
+              </button>
+            </div>
+          )}
+          {cancel.isError && (
+            <p className="mt-1 text-xs text-red-600">{cancelError || "Cancellation failed"}</p>
+          )}
+        </div>
+      )}
       {showMessages && (
         <div className="mt-3 rounded-lg border border-slate-200 p-3">
           {!messages.length && <p className="text-sm text-slate-500">No messages yet.</p>}
