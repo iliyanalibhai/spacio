@@ -66,7 +66,7 @@ sequenceDiagram
     A->>M: insert reservation (status=pending_host_confirmation, paymentStatus=pending_payment, holdExpiresAt=+24h)
     A-->>R: 201 ReservationPublic
     R->>A: POST /payments/checkout/{id} -> Stripe Checkout (card authorized, not charged)
-    Note over A,M: Host later calls POST /reservations/{id}/approve (captures the card)<br/>or /decline (releases the hold). No action within 24h -> expired, hold released (background sweep, §3).
+    Note over A,M: Host later calls POST /reservations/{id}/approve (captures the card)<br/>or /decline (releases the hold). No action within 24h -> expired, hold released (background sweep, §3).<br/>Renter can POST /reservations/{id}/cancel: releases the hold before approval, tiered Stripe refund after (§3).
 ```
 
 ### Request flow: price suggestion (host creating a listing)
@@ -278,7 +278,9 @@ successful Checkout yet) → `authorized` (Checkout completed,
 the PaymentIntent) → `captured` (host approved) **or** `canceled` (host
 declined / renter cancelled while pending) **or** `payment_expired`
 (Checkout Session expired unused — `checkout.session.expired`; the renter
-can retry from "My Reservations").
+can retry from "My Reservations"). After a renter cancels a *confirmed*
+booking (below): `refunded` (full) or `partially_refunded` (50%), with the
+dollar figure in `refundedAmount`.
 **Tradeoffs accepted:** Stripe's own authorization hold on a card only
 lasts about 7 days. The hold-expiry sweep (`app/services/hold_expiry.py`,
 below) releases any outstanding `authorized` PaymentIntent well before
@@ -295,6 +297,55 @@ replica would double-run it. Every branch is idempotent ($set + a
 best-effort `PaymentIntent.cancel`), so double-running is harmless, just
 wasteful; worth moving to a leader-election or single-worker-only scheme
 before that matters.
+
+### Renter cancellation & the tiered refund
+
+**What:** `POST /reservations/{id}/cancel` (renter only). Before the host
+approves, it's identical to a host decline — `cancel_reservation_payment`
+releases the authorization hold, no charge. After approval, when the
+payment is already `captured`, it runs the tiered policy in
+`app/services/refund_policy.py::decide_refund`:
+
+| when the renter cancels | refund |
+| --- | --- |
+| ≥ 72h before the start date | 100% of `totalPrice` |
+| < 72h before the start date | 50% of `totalPrice` |
+| on/after the start date | none — endpoint 409s, "contact support" |
+
+Either way the reservation ends in the new terminal state `cancelled`,
+which is **not** in `CAPACITY_HOLDING_STATUSES`, so the square footage it
+was holding is immediately free for another booking.
+
+**Why the fee is refunded proportionally, not kept:** the refund is a flat
+fraction of the whole `totalPrice`, service fee included. On the Stripe
+side that's a single partial `Refund` with `refund_application_fee=True` +
+`reverse_transfer=True`, which makes Stripe apply the same proportion to
+the platform fee and to the transfer already sent to the host's connected
+account — so a 50% refund claws back 50% of each with no separate
+bookkeeping. Keeping the fee non-refundable was considered (it maps just as
+cleanly to Stripe, `refund_application_fee=False`) but rejected: the 72h
+tier already protects the host from last-minute cancellations, and a
+"we keep our cut even when you cancel early" rule reads worse than it
+saves at this scale.
+
+**Why not best-effort like `cancel_reservation_payment`:**
+`refund_reservation_payment` *raises* on a Stripe error (surfaced as 502).
+Releasing an unspent authorization can safely be fire-and-forget — the hold
+lapses on its own — but a failed refund means real money stays captured, so
+the reservation must stay `confirmed` and the renter must see the failure
+rather than a reservation that looks cancelled with no money back.
+
+**Why a dedicated endpoint, not `DELETE`:** `DELETE /reservations/{id}` now
+409s for a `confirmed` reservation and points here. Deleting the document
+would lose the refund audit trail (`refundedAmount`, the `cancelled`
+status), and a 204 with no body can't carry the refund result back to the
+UI. `DELETE` stays for tearing down a still-pending request or clearing a
+terminal record.
+
+**Client mirror:** `web/src/lib/refundPolicy.ts` re-implements the two
+tiers so the confirmation dialog can tell the renter what they'll get back
+*before* they confirm; the server recomputes and is authoritative. Same
+manually-kept-in-sync pattern as `reservationPricing.ts`.
 
 ### Reservation hold-expiry sweep
 
@@ -607,11 +658,12 @@ radius-search aggregation (§3).
 | `numBoxes` | int | Secure box add-on count, $10/box/month, prorated like the base price |
 | `insuranceDeclaredValue` | float \| null | Drives the insurance tier (§5); `null` if no Spacio insurance was purchased |
 | `hasOwnInsurance` | bool | If true, renter supplied proof of their own insurance instead of buying Spacio's |
-| `status` | enum | `pending_host_confirmation` \| `confirmed` \| `declined` \| `expired` |
+| `status` | enum | `pending_host_confirmation` \| `confirmed` \| `declined` \| `expired` \| `cancelled` (renter cancelled — §3) |
 | `basePrice`, `serviceFee`, `boxCost`, `insuranceCost`, `totalPrice` | float | See §5 for the formula |
 | `holdExpiresAt` | datetime | 24h from creation; the background sweep (§3) expires it and releases any payment hold |
 | `createdAt` | datetime | |
-| `paymentStatus` | enum | `pending_payment` \| `authorized` \| `captured` \| `canceled` \| `payment_expired` — see §3's Checkout section |
+| `paymentStatus` | enum | `pending_payment` \| `authorized` \| `captured` \| `canceled` \| `payment_expired` \| `refunded` \| `partially_refunded` — see §3's Checkout & cancellation sections |
+| `refundedAmount` | float \| null | Dollars refunded when a confirmed booking was cancelled (§3's refund policy); `null` otherwise |
 | `stripeCheckoutSessionId` | string \| null | Set once the renter starts Checkout; never returned in API responses |
 | `stripePaymentIntentId` | string \| null | Set by the `checkout.session.completed` webhook (or the status-poll fallback); what `capture`/`cancel` act on |
 
@@ -723,15 +775,20 @@ stateDiagram-v2
     pending_host_confirmation --> confirmed: host approves
     pending_host_confirmation --> declined: host declines
     pending_host_confirmation --> expired: 24h hold elapses, no action
+    pending_host_confirmation --> cancelled: renter backs out
+    confirmed --> cancelled: renter cancels (tiered refund, §3)
     confirmed --> [*]
     declined --> [*]
     expired --> [*]
+    cancelled --> [*]
 ```
 
-`confirmed`, `declined`, and `expired` are terminal — a reservation cannot be
-approved after it's been declined, for example. The v1 prototype did not
-enforce this (you could call `/approve` on an already-declined reservation);
-`app/services/reservation_state.py` now validates every transition.
+`declined`, `expired`, and `cancelled` are terminal; `confirmed` is terminal
+*except* for a renter-initiated cancellation, which runs the tiered refund
+in §3. A reservation cannot be approved after it's been declined, for
+example. The v1 prototype did not enforce this (you could call `/approve`
+on an already-declined reservation); `app/services/reservation_state.py`
+now validates every transition.
 
 The 24-hour auto-expiry runs as a background sweep (§3's "Reservation
 hold-expiry sweep") that calls this same `is_hold_expired()` check every 60
@@ -1108,15 +1165,46 @@ that supersedes it and say why.
     import) so it still unit-tests without a DB or a model.
   - **Not** in scope: the renter post-approval refund flow (still open, §11)
     and address-level geocoding.
+- **2026-09-09** — Phase 4: renter post-approval cancellation + refund flow
+  (`POST /reservations/{id}/cancel`, `services/refund_policy.py`, new
+  `cancelled` reservation state). One tradeoff decision, made with the
+  project owner via a prompted choice between three refund policies:
+  - **Chosen: tiered — 100% refund ≥72h before the start date, 50% inside
+    that window, none once the stay has started.** Won because the
+    cancellation terms *already shown to renters* in
+    `ListingDetailModal.tsx` ("Free cancellation until 72 hours before…")
+    promised exactly this, so anything else would have made the UI lie. It
+    costs the most logic and the most tests of the three.
+  - Rejected: **full refund minus the non-refundable service fee, before
+    start only** — one flat tier, maps cleanly to Stripe
+    (`refund_application_fee=False`), but it doesn't match the 72h promise
+    already in the product and "we keep our cut when you cancel early"
+    reads badly at this scale.
+  - Rejected: **fully flexible — 100% including the fee, before start
+    only** — simplest to build and most renter-friendly, but gives the
+    host zero protection from a cancellation the day before check-in,
+    which the 72h tier exists to prevent.
+  - Fee is refunded *proportionally* with each tier (a single partial
+    Stripe `Refund` with `refund_application_fee` + `reverse_transfer`, so
+    Stripe splits the clawback across the platform fee and the host
+    transfer automatically). Unlike the best-effort
+    `cancel_reservation_payment`, `refund_reservation_payment` raises on a
+    Stripe error — a failed refund must not leave a reservation looking
+    cancelled with money still captured. `DELETE /reservations/{id}` now
+    409s for a `confirmed` reservation and points at the cancel endpoint,
+    rather than silently hard-deleting a paid booking. Kept
+    `refund_policy.py` a pure function (tested directly) and mirrored the
+    two tiers in `web/src/lib/refundPolicy.ts` for the pre-cancel
+    confirmation dialog — same manually-synced pattern as
+    `reservationPricing.ts`.
 
 Honest, current as of Phase 0:
 
-- **Payments are real (test-mode Stripe), but only for the manual-capture
-  authorize/capture/cancel path.** No refund flow exists yet for a renter
-  who cancels *after* a host has already approved (`paymentStatus:
-  "captured"`) — `DELETE /reservations/{id}` deliberately leaves a captured
-  payment untouched rather than mislabeling it, but doesn't issue a Stripe
-  refund either. See §3.
+- **Payments and refunds are real (test-mode Stripe).** The manual-capture
+  authorize/capture/cancel path plus the renter post-approval cancellation
+  with a tiered Stripe refund (§3). Not yet handled: a *host*-initiated
+  cancellation of a confirmed booking (only the renter can cancel post-
+  approval), and partial-stay / early-move-out proration.
 - **The hold-expiry sweep is a single in-process `asyncio` loop**, not a
   real distributed scheduler — correct for the current single-process
   deployment, but would double-run (harmlessly, since every branch is
