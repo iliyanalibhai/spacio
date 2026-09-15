@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     # matching; real deployments leave it True. See docs/DOCUMENTATION.md §3.
     embeddings_enabled: bool = Field(default=True)
 
+    # S3 bucket for listing photos in production (Phase 5 deploy). Empty
+    # (the default) keeps images on local disk for dev/CI — see
+    # app/services/image_storage.py, which switches on `s3_configured`.
+    s3_bucket: str = Field(default="")
+    aws_region: str = Field(default="us-east-1")
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @field_validator("cors_origins")
@@ -87,6 +93,12 @@ class Settings(BaseSettings):
         only the payment + Connect-onboarding endpoints return 503, and the
         hold-expiry sweep does not start. See docs/DOCUMENTATION.md §3."""
         return bool(self.stripe_secret_key)
+
+    @property
+    def s3_configured(self) -> bool:
+        """True once AWS_S3_BUCKET is set. False (dev/CI default) keeps
+        listing photos on local disk. See app/services/image_storage.py."""
+        return bool(self.s3_bucket)
 
     @property
     def cors_origins_list(self) -> List[str]:

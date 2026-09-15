@@ -8,7 +8,6 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from PIL import Image, UnidentifiedImageError
 from pymongo import UpdateOne
 
-from app.core.paths import UPLOAD_DIR
 from app.deps.auth import get_current_user
 from app.ml.embeddings import listing_text, safe_embed_one
 from app.models.schemas import ListingCreate, ListingPublic, ListingUpdate, StorageSize
@@ -20,6 +19,7 @@ from app.services.geo import (
     to_geojson_point,
     zip_to_coords,
 )
+from app.services.image_storage import save_image
 
 router = APIRouter()
 
@@ -333,13 +333,12 @@ async def upload_image(
     if image_format == "JPEG" and image.mode not in ("RGB", "L"):
         image = image.convert("RGB")
 
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"{uuid4()}{ALLOWED_IMAGE_FORMATS[image_format]}"
-    dest = UPLOAD_DIR / filename
 
-    # Saving the re-decoded pixel data (instead of writing `contents` to disk
-    # as-is) strips EXIF metadata and any bytes appended after the image data
-    # by the client, since only what Pillow actually decoded gets written.
-    image.save(dest, format=image_format)
+    # Saving the re-decoded pixel data (instead of the raw upload bytes)
+    # strips EXIF metadata and any bytes appended after the image data by
+    # the client, since only what Pillow actually decoded gets persisted —
+    # true for either storage backend save_image picks.
+    url = save_image(image, image_format, filename)
 
-    return {"url": f"/uploads/{filename}"}
+    return {"url": url}

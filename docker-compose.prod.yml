@@ -1,0 +1,36 @@
+# Production compose for the single-EC2-instance deploy (Phase 5 — see
+# docs/DOCUMENTATION.md §5 and deploy/DEPLOY.md). Differences from the dev
+# docker-compose.yml:
+#   - no source bind-mounts or --reload: the image's baked-in code runs as-is
+#   - mongo and api are not published on the public interface; nginx (on the
+#     host, terminating TLS) is the only public entrypoint, proxying to api
+#     on 127.0.0.1:8000 — see deploy/nginx/spacio.conf
+#   - restart: unless-stopped so both containers come back after a reboot
+#     or crash
+#
+# Run from the repo root on the deploy host:
+#   docker compose -f docker-compose.prod.yml up -d --build
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+
+  api:
+    build: ./api
+    restart: unless-stopped
+    env_file:
+      - ./api/.env.production
+    environment:
+      MONGODB_URI: mongodb://mongo:27017
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - api-uploads:/app/uploads
+    depends_on:
+      - mongo
+
+volumes:
+  mongo-data:
+  api-uploads:

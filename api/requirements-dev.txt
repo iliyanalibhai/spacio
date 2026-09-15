@@ -7,3 +7,7 @@ mypy==1.11.2
 types-python-jose==3.3.4.20240106
 types-passlib==1.7.7.20240819
 pandas-stubs==3.0.5.260730
+boto3-stubs[s3]==1.43.94
+# Mocks S3 for test_image_storage.py so the S3 code path is covered without
+# real AWS calls/credentials.
+moto[s3]==5.2.3

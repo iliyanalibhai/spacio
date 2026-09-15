@@ -31,3 +31,6 @@ joblib==1.5.3
 # + transformers; torch comes from the CPU wheel index configured above.
 sentence-transformers==6.0.0
 torch==2.13.0
+# S3 storage for listing photos in production (app/services/image_storage.py,
+# Phase 5 deploy). Local disk is still used whenever AWS_S3_BUCKET is unset.
+boto3==1.43.94
