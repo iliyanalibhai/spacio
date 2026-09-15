@@ -16,4 +16,13 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --proxy-headers makes Starlette trust nginx's X-Forwarded-Proto (see
+# deploy/nginx/spacio.conf) so redirects it generates (e.g. FastAPI's
+# trailing-slash redirect) are built as https:// behind TLS-terminating
+# nginx, not http:// — an http:// redirect from an https:// page is mixed
+# content and gets silently blocked by browsers, breaking any route that
+# gets hit without its exact trailing slash. --forwarded-allow-ips='*' is
+# safe here since the container's port is bound to 127.0.0.1 only
+# (docker-compose.prod.yml) — nothing but nginx on the same host can reach
+# it directly.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]

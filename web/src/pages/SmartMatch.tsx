@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import * as matchingApi from "../api/matching";
-import { getListingImage } from "../lib/getListingImage";
+import { MatchResultCard } from "../components/MatchResultCard";
 
 // Named "Smart Match" rather than the v1 prototype's "AI Match". As of
 // Phase 2 the backend (services/matching.py) does real semantic search —
@@ -51,29 +51,7 @@ export function SmartMatch() {
             </div>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {data.listings.map((listing) => (
-                <div
-                  key={listing._id}
-                  className="group overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-lg"
-                >
-                  <div
-                    className="h-32 w-full bg-cover bg-center"
-                    style={{ backgroundImage: `url(${getListingImage(listing)})` }}
-                  />
-                  <div className="p-4">
-                    <div className="flex items-center justify-between text-xs text-slate-500">
-                      <span className="uppercase tracking-wide text-brand-600">
-                        {listing.sizeSqft ? `${listing.sizeSqft} sqft` : listing.size} • {listing.zipCode}
-                      </span>
-                      {listing.rating != null && <span className="text-amber-600">★ {listing.rating}</span>}
-                    </div>
-                    <h3 className="mt-1 text-lg font-semibold text-slate-900">{listing.title}</h3>
-                    <p className="text-sm text-slate-600 line-clamp-2">{listing.description}</p>
-                    <p className="mt-2 text-sm text-slate-500">{listing.addressSummary}</p>
-                    <div className="mt-3 flex items-center justify-between">
-                      <span className="text-lg font-semibold text-slate-900">${listing.pricePerMonth}/mo</span>
-                    </div>
-                  </div>
-                </div>
+                <MatchResultCard key={listing._id} listing={listing} />
               ))}
             </div>
           </div>
