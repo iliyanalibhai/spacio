@@ -1213,6 +1213,17 @@ that supersedes it and say why.
   SVG+PNG fallback — noted honestly in §11 rather than faking an SVG wrapper
   around embedded base64, which the brief separately asked to avoid for the
   main logo reference.
+- **2026-09-16** — Phase 6: guarded `verification.py`'s three endpoints on
+  `settings.stripe_configured`, matching `payments.py`. Not a uniform 503
+  everywhere, though — `POST /create-session` and `POST /webhook` (action
+  endpoints) 503 when unconfigured, but `GET /status` (a poll endpoint)
+  instead degrades to the stored value, exactly mirroring
+  `payments.checkout_status`'s existing convention: a poll should never
+  error, it should just report the last known state. Considered and
+  rejected literally 503-ing all three, since that would make an
+  unconfigured environment's *renter-facing* pages (which never call
+  create-session) show a disabled-feature error on a status check nothing
+  asked for.
 
 Honest, current as of Phase 0:
 

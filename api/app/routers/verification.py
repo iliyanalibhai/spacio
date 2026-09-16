@@ -16,6 +16,9 @@ async def create_verification_session(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
+    if not settings.stripe_configured:
+        raise HTTPException(status_code=503, detail="Identity verification is not configured in this environment")
+
     if current_user.get("verificationStatus") == "verified":
         raise HTTPException(status_code=400, detail="Already verified")
 
@@ -60,7 +63,10 @@ async def get_verification_status(
 ):
     session_id = current_user.get("stripeVerificationSessionId")
 
-    if not session_id:
+    # Mirrors `payments.checkout_status`: a poll endpoint never 500s or
+    # 503s, it just degrades to the stored value when there's nothing to
+    # refresh from (no session yet, or Stripe isn't configured at all).
+    if not session_id or not settings.stripe_configured:
         return {
             "status": current_user.get("verificationStatus", "unverified"),
             "verified": current_user.get("verificationStatus") == "verified",
@@ -94,6 +100,9 @@ async def get_verification_status(
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request, db: AsyncIOMotorDatabase = Depends(get_db)):
+    if not settings.stripe_configured:
+        raise HTTPException(status_code=503, detail="Identity verification is not configured in this environment")
+
     payload = await request.body()
     signature = request.headers.get("stripe-signature", "")
 

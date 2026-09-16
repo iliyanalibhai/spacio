@@ -20,6 +20,11 @@ export function VerificationCard() {
   const isVerified = status?.verified || user?.verificationStatus === "verified";
   const isPending = status?.status === "pending" || status?.status === "processing";
 
+  const createSessionError = createSession.error as
+    | { response?: { status?: number; data?: { detail?: string } } }
+    | undefined;
+  const isDisabled = createSessionError?.response?.status === 503;
+
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="flex items-center justify-between">
@@ -61,11 +66,16 @@ export function VerificationCard() {
           >
             {createSession.isPending ? "Starting verification..." : "Verify My Identity"}
           </button>
-          {createSession.error && (
-            <p className="mt-2 text-sm text-red-600">
-              {(createSession.error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-                "Failed to start verification"}
+          {isDisabled ? (
+            <p className="mt-2 text-sm text-slate-500">
+              Identity verification is disabled in this environment — no Stripe key configured.
             </p>
+          ) : (
+            createSession.error && (
+              <p className="mt-2 text-sm text-red-600">
+                {createSessionError?.response?.data?.detail || "Failed to start verification"}
+              </p>
+            )
           )}
         </div>
       )}
