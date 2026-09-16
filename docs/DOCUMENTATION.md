@@ -1291,6 +1291,23 @@ that supersedes it and say why.
   thread and a review form once a confirmed stay has ended — so reusing it
   gave renters "messaging" and "a prompt to review" for free, correctly,
   without a second implementation to keep in sync with Profile's.
+- **2026-09-16** — Phase 6: added a city/neighborhood typeahead to
+  `SearchHero`, scoped down from the brief's original ask after review.
+  `api/app/data/zip_centroids.csv` is `zip,lat,lng` only — no city column —
+  and its docstring records that Census was chosen specifically *because*
+  it's public domain, unlike GeoNames/SimpleMaps, which need attribution.
+  Vendoring a second dataset just to get city names would have quietly
+  reversed that already-documented decision. Instead, the typeahead
+  matches against the `addressSummary`/`zipCode` of listings that already
+  exist — free, no new data, no attribution obligation, and it never
+  suggests a city with zero inventory (a worse experience than not
+  suggesting it, per the brief). Reuses `FeaturedListings`'s
+  `["listings", "featured"]` query cache rather than firing a second
+  request. If a real address-level or arbitrary-city geocoder is ever
+  wanted, §11 records the real follow-up shape: join city/state columns
+  onto the existing CSV from GeoNames via `build_zip_centroids.py`, keep
+  Census lat/lng authoritative, and put the CC-BY attribution in the
+  footer.
 
 Honest, current as of Phase 0:
 
