@@ -1008,9 +1008,28 @@ canonical quickstart, not two documents that can drift apart.
 
 ## 9. Deployment
 
-Not yet implemented. Planned for Phase 2 (MongoDB Atlas, API on Render/Fly.io,
-web on Vercel). Will be documented here with environments, env vars, CI/CD,
-and rollback steps once real.
+Live at **https://spacio.cc** as of Phase 5. The original plan here (a
+managed Atlas/Render/Vercel split) was superseded — see §10's Phase 5 entry
+for why a single EC2 instance was chosen instead (the instance/security
+groups/nginx/TLS ops work was the point, for the infra learning value).
+
+- One `t3.micro` EC2 instance (Ubuntu 24.04) runs Docker Compose: the API
+  container and a MongoDB container, both bound to `127.0.0.1` only —
+  nginx on the host is the sole public entrypoint, terminating real TLS
+  (Let's Encrypt/certbot, auto-renewing) and reverse-proxying the API's
+  route prefixes; everything else falls through to the built React app,
+  served as static files from the same origin so the session cookie needs
+  no cross-site handling.
+- Listing photos go to S3 once `S3_BUCKET` is set (`app/services/image_storage.py`),
+  written via an IAM instance role rather than static AWS keys on the box.
+- Full step-by-step runbook — AWS CLI commands for the S3 bucket, IAM role,
+  security group, EC2 launch, Elastic IP, nginx/certbot setup, and the
+  redeploy procedure — lives in [`deploy/DEPLOY.md`](../deploy/DEPLOY.md),
+  kept as one canonical copy rather than duplicated here.
+- Rollback: `git revert` the bad commit, `git pull` on the instance, rerun
+  the relevant `docker compose up -d --build` / frontend rebuild-and-`scp`
+  step from `deploy/DEPLOY.md`. No blue/green or automated rollback exists
+  — a single-instance deploy accepts brief downtime during a redeploy.
 
 ## 10. Decision log
 
@@ -1309,7 +1328,12 @@ that supersedes it and say why.
   Census lat/lng authoritative, and put the CC-BY attribution in the
   footer.
 
-Honest, current as of Phase 0:
+## 11. Known limitations & next steps
+
+Honest, current as of Phase 6 (2026-09-16) — this section is updated in the
+same commit as whatever changes it describes, same rule as §10.
+
+### Known limitations
 
 - **Payments and refunds are real (test-mode Stripe).** The manual-capture
   authorize/capture/cancel path plus the renter post-approval cancellation
@@ -1317,41 +1341,81 @@ Honest, current as of Phase 0:
   cancellation of a confirmed booking (only the renter can cancel post-
   approval), and partial-stay / early-move-out proration.
 - **The hold-expiry sweep is a single in-process `asyncio` loop**, not a
-  real distributed scheduler — correct for the current single-process
-  deployment, but would double-run (harmlessly, since every branch is
+  real distributed scheduler — correct for the current single-EC2-instance
+  deployment (§9), but would double-run (harmlessly, since every branch is
   idempotent) with more than one API replica. See §3.
 - **Reviews are real but minimal.** Create + read only — no edit, no
   delete, no moderation/reporting flow, and no way for a host to review a
   renter (only listing reviews exist). See §3.
 - **Pricing suggestions are a real trained model, but trained entirely on
-  synthetic data** — there's still no real booking history. See §6 for the
-  full limitations list; must be retrained once real data exists.
-- **Coordinates are ZIP-centroid, not rooftop.** As of Phase 4 search is a
-  real `$geoNear` radius query and the results have a map (§3), but every
-  listing's point is the centroid of its ZIP Code Tabulation Area (~1–3 mi
-  off in a typical suburban ZIP), because only a ZIP and a neighbourhood
-  `addressSummary` are stored. Good enough for "storage within N miles"; not
-  for "0.2 mi away" precision. An address-level geocoder or a host pin-drop
-  would fix it.
+  synthetic data** — there's still no real booking history to train or
+  validate against. See §6 for the full limitations list; must be
+  retrained once real data exists.
+- **Smart Match is real semantic search, with no relevance evaluation.**
+  Sentence-transformer embeddings and cosine similarity as of Phase 2 (§3),
+  but there's no labelled match-quality dataset, so its rerank weights are
+  hand-set and there's no precision@k number — same honesty caveat as the
+  pricing model's synthetic MAE.
+- **Coordinates are ZIP-centroid, not rooftop.** Search is a real
+  `$geoNear` radius query with a map (§3, Phase 4), but every listing's
+  point is the centroid of its ZIP Code Tabulation Area — accurate to
+  roughly 1-3 miles in a typical suburban ZIP, because only a ZIP and a
+  neighbourhood `addressSummary` are stored (deliberately, for host
+  privacy). Good enough for "storage within N miles," not "0.2 mi away"
+  precision. The Phase 6 city/neighborhood typeahead (§10) matches against
+  existing listings rather than geocoding arbitrary text, for the same
+  reason — see the GeoNames follow-up shape below if real city geocoding
+  is ever wanted.
 - **The map uses OpenStreetMap's public tile server.** Fine at portfolio /
   low traffic, but its usage policy expects a real tile provider (or a
   self-hosted cache) for production volume.
-- **Smart Match has no relevance evaluation.** It's real semantic search as
-  of Phase 2 (§3), but there's no labelled match-quality dataset, so its
-  rerank weights are hand-set and there's no precision@k number — same
-  honesty caveat as the pricing model's synthetic MAE.
 - **Theoretical race condition in the capacity check** under concurrent
   bookings for the same listing and overlapping dates, due to MongoDB's lack
   of default multi-document transactions. See §3 (MongoDB tradeoffs).
-- **Several Tier 2 security issues from the v1 audit are still open** — see
-  §7's table. Phase 1 closes these before anything is deployed publicly.
-- **No explicit CSRF token.** Login now uses an `HttpOnly` cookie
-  (§3/§7), mitigated with `SameSite=Lax`, which blocks most forged
-  cross-site requests but isn't as strong as a dedicated CSRF token on
-  state-changing routes. Worth adding before this handles real payments.
+- **No explicit CSRF token.** Login uses an `HttpOnly` cookie (§3/§7),
+  mitigated with `SameSite=Lax`, which blocks most forged cross-site
+  requests but isn't as strong as a dedicated CSRF token on state-changing
+  routes.
 - **No JWT denylist/revocation.** A stolen-but-not-yet-expired token, or a
   user who wants to "log out everywhere," can't be invalidated early — the
   token is just valid until its `exp` claim passes. See §3.
-- **No pagination anywhere yet.** Listing and reservation queries use a fixed
-  `to_list(length=...)` cap. Fine at seed-data scale, not fine at real scale.
-  Phase 5.
+- **No pagination anywhere yet.** Listing and reservation queries use a
+  fixed `to_list(length=...)` cap. Fine at seed-data scale, not at real
+  scale.
+- **No end-to-end test suite.** ~190 backend pytest cases (unit + API,
+  real MongoDB in CI) and frontend unit tests for `web/src/lib/`'s pure
+  business logic, but nothing drives a real browser through the booking
+  flow in CI — the closest thing is manual `claude-in-chrome` smoke-testing
+  done ad hoc during development (see the Phase 6 entries in §10), not a
+  repeatable, checked-in suite.
+- **`stripe.api_key` is a shared global, assigned identically in three
+  files** (`verification.py`, `payments.py`, `services/reservation_payments.py`)
+  rather than read from `settings` at each call site. Harmless today —
+  all three assign the exact same value — but it's an easy place for a
+  future edit (e.g. supporting more than one Stripe account) to
+  silently break two other files. Noted here as a known smell per Phase
+  6's review (§10); not fixed, since fixing it wasn't traceable to any
+  actual defect in this phase's scope.
+- **The favicon and app icon are PNG-only, not SVG+PNG.** The logo asset
+  is a raster screenshot with no vector original, so a scalable SVG
+  favicon isn't possible without redrawing it. Generated PNG sizes
+  (16/32/180/512px) cover real usage; see §10.
+
+### Next steps
+
+- Real address-level geocoding (or a host pin-drop) if the ZIP-centroid's
+  1-3 mile accuracy becomes a real complaint, not a portfolio caveat.
+- If arbitrary-city search (not just cities with existing inventory) is
+  wanted: join city/state columns onto `zip_centroids.csv` from a GeoNames
+  US postal file via `build_zip_centroids.py`, keep the existing Census
+  lat/lng as the authoritative source (unchanged behavior for everything
+  that already works), and put GeoNames' CC-BY attribution in the footer.
+- A CSRF token on state-changing routes, and a JWT denylist for
+  logout-everywhere / stolen-token invalidation.
+- Host-initiated cancellation and partial-stay/early-move-out proration.
+- Pagination on listing/reservation queries.
+- A real, checked-in end-to-end test suite (e.g. Playwright) covering the
+  golden path (register → verify → list → search → book → approve →
+  message → review) in CI, replacing ad hoc manual smoke-testing.
+- Retrain the pricing model and re-tune Smart Match's rerank weights once
+  real booking data exists to validate against.

@@ -1,4 +1,12 @@
-# Spacio
+<div align="center">
+  <img src="web/public/logo.png" alt="Spacio" width="140" />
+
+  # Spacio
+
+  **[spacio.cc](https://spacio.cc)**
+
+  ![Spacio landing page](docs/assets/landing-screenshot.jpg)
+</div>
 
 Spacio is a peer-to-peer storage marketplace, "Airbnb for storage." People with
 unused space (garages, closets, spare bedrooms, basements) list it. People who
@@ -24,15 +32,25 @@ spacio/
 
 ## Status
 
-This project is under active, phased development. See
-[`docs/DOCUMENTATION.md` §11](docs/DOCUMENTATION.md#11-known-limitations--next-steps)
-for exactly what's finished versus stubbed. Nothing in this README claims more
-than what's actually implemented, if a feature isn't listed below, assume
-it's not built yet.
+All six planned phases are done and live at [spacio.cc](https://spacio.cc).
+See [`docs/DOCUMENTATION.md` §11](docs/DOCUMENTATION.md#11-known-limitations--next-steps)
+for the honest limitations list — nothing in this README claims more than
+what's actually implemented.
 
-Currently implemented (Phase 0): user auth, listings, pro-rated bookings with
-concurrent-capacity enforcement, reservation-scoped messaging, Stripe Identity
-host verification, and a seed script with working demo accounts.
+Built: cookie-based JWT auth; listings CRUD with pro-rated, capacity-enforced
+bookings (a listing supports multiple concurrent renters as long as
+overlapping reservations never exceed its total square footage); a 24-hour
+reservation hold that expires via a background sweep; reservation-scoped
+messaging; Stripe Identity host verification (selfie match); Stripe Checkout
+with manual-capture authorize/capture/cancel; Stripe Connect host payouts;
+tiered renter cancellation refunds; a review system; a real LightGBM pricing
+model; sentence-transformer semantic search ("Smart Match"); ZIP-centroid
+radius search over a vendored Census gazetteer with a Leaflet map and a
+listings-based city/neighborhood typeahead; S3-backed listing photos; a
+landing page with featured listings, value-prop, host, and trust sections; a
+full renter dashboard; CI for both halves; and a from-scratch EC2 deployment
+(nginx, real TLS, an IAM instance role for S3) documented end-to-end in
+[`deploy/DEPLOY.md`](deploy/DEPLOY.md).
 
 ## Local development
 
