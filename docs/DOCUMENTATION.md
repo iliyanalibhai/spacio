@@ -1197,6 +1197,22 @@ that supersedes it and say why.
     two tiers in `web/src/lib/refundPolicy.ts` for the pre-cancel
     confirmation dialog — same manually-synced pattern as
     `reservationPricing.ts`.
+- **2026-09-16** — Phase 6 ("The Front Door"): re-toned `tailwind.config.js`'s
+  `brand` scale from the placeholder blue to the real logo's navy
+  (`#10306a`), and added a new `accent` scale for the logo's magenta cube.
+  Both hex ranges were sampled directly from `web/public/logo.png`, not
+  hand-guessed. Deliberately did **not** do a sweeping find/replace of every
+  `bg-brand-*` button to `accent-*`: `brand` (navy) stays the broad
+  surface/text/nav color exactly like the old blue was, and `accent`
+  (magenta) is used only on the small set of highest-emphasis, first-impression
+  CTAs (the search button, primary booking/host marketing actions) — "use
+  magenta sparingly," per the brief, meant sparingly in the literal
+  find/replace sense too, not just visually. The source asset is a raster
+  PNG screenshot with no vector original, so the favicon is PNG-only
+  (16/32/180/512px, generated from a cropped icon-only region) rather than
+  SVG+PNG fallback — noted honestly in §11 rather than faking an SVG wrapper
+  around embedded base64, which the brief separately asked to avoid for the
+  main logo reference.
 
 Honest, current as of Phase 0:
 

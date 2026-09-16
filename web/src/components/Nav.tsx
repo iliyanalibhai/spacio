@@ -9,8 +9,9 @@ export function Nav() {
   return (
     <header className="border-b bg-white sticky top-0 z-50">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-        <Link to="/" className="text-xl font-bold text-brand-600">
-          Spacio
+        <Link to="/" className="flex items-center gap-2">
+          <img src="/icon.png" alt="" className="h-9 w-9 rounded-lg" />
+          <span className="text-xl font-bold text-brand-800">spacio</span>
         </Link>
         <nav className="flex items-center gap-3 text-sm font-medium text-slate-600">
           {!user && (
