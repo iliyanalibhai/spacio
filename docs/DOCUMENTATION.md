@@ -1243,6 +1243,20 @@ that supersedes it and say why.
   an `onVerified` callback, wired to `refreshUser`, so the moment the poll
   confirms verified, the app-wide `user` object (not just Mongo) catches up
   without a second Stripe round trip.
+- **2026-09-16** — Phase 6: made the ZIP field in `SearchHero` uncommitted
+  until form submit, instead of debouncing. `filters.zipCode` (the query
+  key) previously updated on every keystroke, so a search fired mid-type
+  — the fix keeps a local `zipInput` string and only writes it into
+  `filters` in the form's `onSubmit`. Chose gating over a debounce timer:
+  it's simpler (no timer/cleanup, no new dependency), fully deterministic
+  (no "how many ms is right" guess), and directly matches the brief's other
+  ask — a real `<button type="submit">` — since a submit-gated field and an
+  explicit submit button are the same mechanism, not two separate fixes.
+  Radius, the date pickers, and "Use my location" stay wired straight to
+  `filters` and continue to re-query immediately — they're discrete
+  selections, not free-text typing, so there's no thrash risk to gate
+  against, and gating them too would make routine post-search refinement
+  (e.g. widening the radius) feel unresponsive for no reason.
 
 Honest, current as of Phase 0:
 

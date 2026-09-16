@@ -1,3 +1,4 @@
+import { useState, type FormEvent } from "react";
 import type { StorageSize } from "../types";
 
 export type SearchFilters = {
@@ -33,6 +34,19 @@ export function SearchHero({
   onClearMyLocation,
   geoError,
 }: Props) {
+  // Uncommitted until the form submits — typing here used to write straight
+  // into `filters`, which is the query key, so a search fired on every
+  // keystroke (including a single, meaningless first digit). Radius and the
+  // date pickers stay wired directly to `filters` below: they're discrete
+  // selections, not free-text typing, so there's no thrash risk in letting
+  // them re-query immediately. See docs/DOCUMENTATION.md §10.
+  const [zipInput, setZipInput] = useState(filters.zipCode ?? "");
+
+  const handleSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    setFilters((f) => ({ ...f, zipCode: zipInput }));
+  };
+
   return (
     <div className="relative min-h-[380px]">
       <div
@@ -52,17 +66,18 @@ export function SearchHero({
           </p>
         </div>
 
-        <div className="bg-white rounded-2xl shadow-2xl p-2 max-w-4xl mx-auto">
+        <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-2xl p-2 max-w-4xl mx-auto">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
             <div className="p-3 md:border-r border-slate-200">
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+              <label htmlFor="search-zip" className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
                 Location
               </label>
               <input
+                id="search-zip"
                 type="text"
                 placeholder="Enter ZIP code"
-                value={filters.zipCode || ""}
-                onChange={(e) => setFilters((f) => ({ ...f, zipCode: e.target.value }))}
+                value={zipInput}
+                onChange={(e) => setZipInput(e.target.value)}
                 className="w-full text-slate-900 font-medium placeholder:text-slate-400 outline-none text-lg"
               />
             </div>
@@ -92,9 +107,13 @@ export function SearchHero({
             </div>
 
             <div className="p-2 flex items-center">
-              <div className="w-full h-full bg-gradient-to-r from-brand-600 to-brand-500 text-white rounded-xl font-semibold text-lg flex items-center justify-center gap-2 min-h-[56px]">
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="w-full h-full bg-gradient-to-r from-accent-600 to-accent-500 text-white rounded-xl font-semibold text-lg flex items-center justify-center gap-2 min-h-[56px] transition hover:from-accent-700 hover:to-accent-600 disabled:opacity-70"
+              >
                 {isLoading ? "Searching..." : "Search"}
-              </div>
+              </button>
             </div>
           </div>
 
@@ -132,7 +151,7 @@ export function SearchHero({
             )}
             {geoError && <span className="text-red-600">{geoError}</span>}
           </div>
-        </div>
+        </form>
 
         <div className="flex flex-wrap justify-center gap-6 mt-8 text-white/90">
           <div className="flex items-center gap-2">
