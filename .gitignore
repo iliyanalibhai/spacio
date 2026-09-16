@@ -32,6 +32,10 @@ ml/models/*.joblib
 ml/models/*.pkl
 ml/data/*.csv
 
+# Local-machine-specific compose overrides (e.g. remapping a port that
+# conflicts with something else already running on this machine)
+docker-compose.override.yml
+
 # OS / editor
 .DS_Store
 *.log
