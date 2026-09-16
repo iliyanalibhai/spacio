@@ -1282,6 +1282,15 @@ that supersedes it and say why.
   outer layout a flex column (`Nav` / `flex-1` route content / `Footer`) so
   the footer sits at the bottom of the viewport on short pages instead of
   floating mid-page.
+- **2026-09-16** — Phase 6: rebuilt `RenterDashboard` (a 26-line, two-card
+  stub versus `HostDashboard`'s 105 lines) by reusing `ReservationsTab` —
+  the same active/past-reservation component `Profile.tsx` already uses —
+  rather than the plainer `ReservationList`. Messaging and the
+  review-after-stay prompt weren't built from scratch: `ProfileReservationCard`
+  (rendered by `ReservationsTab`) already has both — a per-reservation chat
+  thread and a review form once a confirmed stay has ended — so reusing it
+  gave renters "messaging" and "a prompt to review" for free, correctly,
+  without a second implementation to keep in sync with Profile's.
 
 Honest, current as of Phase 0:
 
