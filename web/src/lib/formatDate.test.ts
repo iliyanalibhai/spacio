@@ -11,4 +11,11 @@ describe("formatDateOnly", () => {
   it("formats a date near a month boundary correctly", () => {
     expect(formatDateOnly("2026-01-31")).toBe(new Date(2026, 0, 31).toLocaleDateString());
   });
+
+  it("strips a time component instead of producing Invalid Date", () => {
+    // ListingPublic.availableFrom/availableTo are typed Optional[datetime]
+    // in schemas.py, so they serialize with a "T00:00:00" suffix, unlike
+    // reservation dates (typed `date`, no time component).
+    expect(formatDateOnly("2026-09-01T00:00:00")).toBe(new Date(2026, 8, 1).toLocaleDateString());
+  });
 });
