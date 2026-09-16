@@ -1263,6 +1263,19 @@ that supersedes it and say why.
   original (an ambiguous close-up of a hand and a piece of wood) read as
   "person," not "storage." Replaced with a free-licensed Unsplash photo of
   an actual garage.
+- **2026-09-16** — Phase 6: rebuilt the landing page's default (no-search)
+  state, which previously ended after `HowItWorks` with nothing below it.
+  Added, in order: `FeaturedListings` (calls `GET /listings` with no
+  params — already returns everything unfiltered server-side, so this
+  needed no backend change, just a frontend consumer that existed nowhere
+  before), `ValueProps` (the real pricing/insurance numbers from §5, not
+  invented copy), `HostCTA` (the exact host-earnings line from the brief,
+  linking to `/register` for a new visitor or `/profile` — where "Become a
+  Host" actually lives — for one already logged in), and `TrustSection`
+  (identity verification, insurance, and the secure box — surfacing
+  features that were already built and completely invisible from the
+  front door, using the real 93.8%/87.5% adoption-barrier research numbers
+  from the product brief, rounded to 94%/88% for display).
 
 Honest, current as of Phase 0:
 

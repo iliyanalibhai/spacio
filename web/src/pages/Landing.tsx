@@ -6,6 +6,10 @@ import { ListingDetailModal } from "../components/ListingDetailModal";
 import { SearchHero, type SearchFilters } from "../components/SearchHero";
 import { SearchResults } from "../components/SearchResults";
 import { HowItWorks } from "../components/HowItWorks";
+import { FeaturedListings } from "../components/FeaturedListings";
+import { ValueProps } from "../components/ValueProps";
+import { HostCTA } from "../components/HostCTA";
+import { TrustSection } from "../components/TrustSection";
 
 export function Landing() {
   const [filters, setFilters] = useState<SearchFilters>({ radiusMiles: 25 });
@@ -84,7 +88,13 @@ export function Landing() {
             onSelect={setSelected}
           />
         ) : (
-          <HowItWorks />
+          <div className="space-y-16">
+            <FeaturedListings onSelect={setSelected} />
+            <ValueProps />
+            <HowItWorks />
+            <HostCTA />
+            <TrustSection />
+          </div>
         )}
 
         {selected && (
