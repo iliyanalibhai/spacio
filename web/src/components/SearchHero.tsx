@@ -52,8 +52,12 @@ export function SearchHero({
       <div
         className="absolute inset-0 h-[380px] bg-cover bg-center"
         style={{
+          // A bright yellow three-door garage (Sijmen van Hooff, Unsplash,
+          // free license) — the previous photo was an ambiguous close-up of
+          // a hand and a piece of wood, which read as "person," not
+          // "storage." See docs/DOCUMENTATION.md §10.
           backgroundImage:
-            "url('https://images.unsplash.com/photo-1558618666-fcd25c85cd64?auto=format&fit=crop&w=2000&q=80')",
+            "url('https://images.unsplash.com/photo-1766503494749-0806c2a0aab4?auto=format&fit=crop&w=2000&q=80')",
         }}
       />
       <div className="absolute inset-0 h-[380px] bg-gradient-to-b from-black/50 via-black/30 to-transparent" />

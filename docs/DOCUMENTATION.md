@@ -1257,6 +1257,12 @@ that supersedes it and say why.
   selections, not free-text typing, so there's no thrash risk to gate
   against, and gating them too would make routine post-search refinement
   (e.g. widening the radius) feel unresponsive for no reason.
+- **2026-09-16** — Phase 6: added `lucide-react` and gave `HowItWorks`'s
+  three steps real icons (`Search`, `ShieldCheck`, `PiggyBank`) instead of
+  empty colored divs, and swapped the hero photo (`SearchHero`) — the
+  original (an ambiguous close-up of a hand and a piece of wood) read as
+  "person," not "storage." Replaced with a free-licensed Unsplash photo of
+  an actual garage.
 
 Honest, current as of Phase 0:
 
