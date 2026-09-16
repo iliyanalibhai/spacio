@@ -60,7 +60,7 @@ export function HostDashboard() {
       )}
       <div className="mt-6 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
         <div className="space-y-4">
-          <VerificationCard />
+          <VerificationCard onVerified={refreshUser} />
           <PayoutOnboardingCard />
           <CreateListingForm />
         </div>

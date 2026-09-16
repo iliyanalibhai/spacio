@@ -1224,6 +1224,25 @@ that supersedes it and say why.
   unconfigured environment's *renter-facing* pages (which never call
   create-session) show a disabled-feature error on a status check nothing
   asked for.
+- **2026-09-16** — Phase 6: fixed a real deadlock in host verification.
+  `isHost` flips true the moment a verification *session* is created
+  (`create-session`, well before Stripe confirms anything), but
+  `Nav.tsx`/`ProfileHeader.tsx` only exposed a route to `/host` once
+  `verificationStatus === "verified"` — so a pending host had no visible
+  way to reach the one page (`HostDashboard`, via `VerificationCard`) that
+  polls Stripe and can resolve their own status. Stripe's `return_url`
+  compounds it by landing on `/profile`, which only called `refreshUser()`
+  (a stale re-read of `/auth/me`), never `/verification/status`. Fixed
+  three ways: (1) Nav/ProfileHeader now gate navigation on `isHost` alone —
+  the route guard in `App.tsx` already only checked `isHost`, so this was
+  purely a visibility bug, not a backend change; (2) `VerificationCard` now
+  renders on `/profile` itself whenever `user.isHost` and not yet verified,
+  so the poll that was always capable of resolving processing→verified on
+  its own (proven in `api/tests/test_verification.py`, which needed no
+  changes) actually runs somewhere a host is guaranteed to land; (3) added
+  an `onVerified` callback, wired to `refreshUser`, so the moment the poll
+  confirms verified, the app-wide `user` object (not just Mongo) catches up
+  without a second Stripe round trip.
 
 Honest, current as of Phase 0:
 

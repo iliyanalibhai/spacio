@@ -36,30 +36,27 @@ export function ProfileHeader({ user, becomingHost, onBecomeHost, onGoToHostDash
         </div>
 
         <div className="flex-shrink-0">
-          {user.isHost && user.verificationStatus === "verified" ? (
+          {/* Navigation is gated only on isHost, never on verification
+              status — the dashboard (behind App.tsx's hostOnly route
+              guard, which already only checks isHost) is where an
+              unverified host actually goes to become verified. Gating
+              this button the way the old Nav.tsx link was gated is
+              exactly what caused the verification deadlock; see
+              docs/DOCUMENTATION.md §10. */}
+          {user.isHost ? (
             <button
               onClick={onGoToHostDashboard}
               className="bg-brand-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-brand-500 transition-colors"
             >
               Host Dashboard
             </button>
-          ) : !user.isHost ? (
+          ) : (
             <button
               onClick={onBecomeHost}
               disabled={becomingHost}
               className="bg-gradient-to-r from-brand-600 to-brand-500 text-white px-4 py-2 rounded-lg font-medium hover:from-brand-500 hover:to-brand-400 transition-all disabled:opacity-50"
             >
               {becomingHost ? "Starting..." : "Become a Host"}
-            </button>
-          ) : user.verificationStatus === "pending" ? (
-            <span className="text-sm text-slate-500">Verification in progress</span>
-          ) : (
-            <button
-              onClick={onBecomeHost}
-              disabled={becomingHost}
-              className="bg-brand-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-brand-500 transition-colors disabled:opacity-50"
-            >
-              {becomingHost ? "Starting..." : "Complete Verification"}
             </button>
           )}
         </div>

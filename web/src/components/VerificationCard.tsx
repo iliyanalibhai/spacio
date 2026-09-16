@@ -1,14 +1,35 @@
+import { useEffect, useRef } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useAuth } from "../hooks/useAuth";
 import * as verificationApi from "../api/verification";
 
-export function VerificationCard() {
+type Props = {
+  // Fires once, the moment a poll resolves to verified — not on every
+  // refetch. GET /verification/status already syncs Mongo from the live
+  // Stripe session on its own (see api/tests/test_verification.py), but
+  // that doesn't update the app-wide `user` object from useAuth, which
+  // still reflects whatever /auth/me last returned. Rendering this card
+  // wherever a host might land right after Stripe's redirect (the Profile
+  // page) and wiring this callback to refreshUser is what actually closes
+  // the verification deadlock — see docs/DOCUMENTATION.md §10.
+  onVerified?: () => void;
+};
+
+export function VerificationCard({ onVerified }: Props = {}) {
   const { user } = useAuth();
   const { data: status, isLoading, refetch } = useQuery({
     queryKey: ["verification-status"],
     queryFn: verificationApi.getVerificationStatus,
     refetchInterval: 5000,
   });
+
+  const notifiedRef = useRef(false);
+  useEffect(() => {
+    if (status?.verified && !notifiedRef.current) {
+      notifiedRef.current = true;
+      onVerified?.();
+    }
+  }, [status?.verified, onVerified]);
 
   const createSession = useMutation({
     mutationFn: verificationApi.createVerificationSession,

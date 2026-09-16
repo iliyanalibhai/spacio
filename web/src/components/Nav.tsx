@@ -66,7 +66,10 @@ export function Nav() {
                       <span className="text-slate-700">My Reservations</span>
                     </Link>
 
-                    {user.isHost && user.verificationStatus === "verified" && (
+                    {/* Gated only on isHost — see ProfileHeader.tsx for why
+                        gating this on verification status caused the
+                        verification deadlock (docs/DOCUMENTATION.md §10). */}
+                    {user.isHost && (
                       <Link
                         to="/host"
                         className="flex items-center gap-3 px-4 py-3 hover:bg-slate-50 transition-colors"

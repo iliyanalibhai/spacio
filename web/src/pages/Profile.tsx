@@ -8,6 +8,7 @@ import * as paymentsApi from "../api/payments";
 import { ProfileHeader } from "../components/ProfileHeader";
 import { ProfileInfoTab } from "../components/ProfileInfoTab";
 import { ReservationsTab } from "../components/ReservationsTab";
+import { VerificationCard } from "../components/VerificationCard";
 
 export function Profile() {
   const { user, refreshUser } = useAuth();
@@ -89,6 +90,12 @@ export function Profile() {
           onBecomeHost={() => becomeHostMutation.mutate()}
           onGoToHostDashboard={() => navigate("/host")}
         />
+
+        {user.isHost && user.verificationStatus !== "verified" && (
+          <div className="mb-6">
+            <VerificationCard onVerified={refreshUser} />
+          </div>
+        )}
 
         <div className="flex gap-1 bg-white rounded-xl p-1 shadow-sm border border-slate-200 mb-6">
           <button
