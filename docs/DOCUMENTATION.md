@@ -1276,6 +1276,12 @@ that supersedes it and say why.
   features that were already built and completely invisible from the
   front door, using the real 93.8%/87.5% adoption-barrier research numbers
   from the product brief, rounded to 94%/88% for display).
+- **2026-09-16** — Phase 6: added a site-wide `Footer` (mark, tagline, and
+  links to real routes only — no fabricated pages) rendered once in
+  `App.tsx` alongside `Nav`, not per-page, so every route gets it. Made the
+  outer layout a flex column (`Nav` / `flex-1` route content / `Footer`) so
+  the footer sits at the bottom of the viewport on short pages instead of
+  floating mid-page.
 
 Honest, current as of Phase 0:
 
